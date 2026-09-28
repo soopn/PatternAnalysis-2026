@@ -1,0 +1,24 @@
+[tool.black]
+line-length = 80
+
+[tool.pyright]
+reportPrivateImportUsage = false
+typeCheckingMode = "basic"
+reportOptionalMemberAccess = false
+reportAttributeAccessIssue = false
+
+[tool.pylint.messages_control]
+disable = [
+    'C0114',
+    'C0116',
+    'W0105',
+    'W0511',
+    'trailing-whitespace',
+    'W0611',
+    'W0612',
+    'W0613',
+    'E0602',
+    'R0917',
+    'R0903',
+    'R0913'
+]
