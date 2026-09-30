@@ -1,7 +1,7 @@
-import csv
 from pathlib import Path
 
-import torch
+from torch import tensor, float32
+from pandas import read_csv
 from torch.utils.data import Dataset
 
 
@@ -51,15 +51,8 @@ class LOBSTERDataset(Dataset):
 
     @staticmethod
     def _load_csv(path):
-        rows = []
-
-        with open(path, "r", newline="") as f:
-            reader = csv.reader(f)
-
-            for row in reader:
-                rows.append([float(x) for x in row])
-
-        return torch.tensor(rows, dtype=torch.float32)
+        df = read_csv(path)
+        return tensor(df.values, dtype=float32)
 
     def __len__(self):
         return sum(len(sample["messages"]) for sample in self.samples)
