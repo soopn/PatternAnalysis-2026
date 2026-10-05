@@ -6,24 +6,21 @@ from torch.utils.data import Dataset
 
 
 class LOBSTERDataset(Dataset):
+    """Data loader for LOBSTER dataset"""
 
-    def __init__(self, root="LOBSTER_DATA"):
+    def __init__(self, root="LOBSTER_DATA", seq_len=100):
         self.root = Path(root)
-
+        self.seq_len = seq_len
         self.samples = []
 
-        # Find all message CSVs recursively
         message_files = sorted(self.root.rglob("*message*.csv"))
 
         for message_file in message_files:
 
-            # Find the corresponding orderbook file
             orderbook_name = message_file.name.replace("message", "orderbook")
-
             orderbook_file = message_file.with_name(orderbook_name)
 
             if not orderbook_file.exists():
-                print(f"Missing orderbook for {message_file}")
                 continue
 
             messages = self._load_csv(message_file)
@@ -32,11 +29,9 @@ class LOBSTERDataset(Dataset):
             if len(messages) != len(orderbook):
                 raise ValueError(
                     f"Row mismatch: {message_file} "
-                    f"({len(messages)}) vs {orderbook_file} "
-                    f"({len(orderbook)})"
+                    f"({len(messages)}) vs {orderbook_file}"
                 )
 
-            # Store tensors and their source
             self.samples.append(
                 {
                     "messages": messages,
@@ -45,9 +40,14 @@ class LOBSTERDataset(Dataset):
                 }
             )
 
-            print(
-                f"Loaded {message_file.parent.name}: " f"{len(messages)} rows"
-            )
+        # Generate valid sequence starting positions
+        self.indices = []
+
+        for day, sample in enumerate(self.samples):
+            n = len(sample["messages"])
+
+            for start in range(0, n - seq_len + 1, seq_len):
+                self.indices.append((day, start))
 
     @staticmethod
     def _load_csv(path):
@@ -55,19 +55,17 @@ class LOBSTERDataset(Dataset):
         return tensor(df.values, dtype=float32)
 
     def __len__(self):
-        return sum(len(sample["messages"]) for sample in self.samples)
+        return len(self.indices)
 
     def __getitem__(self, idx):
 
-        for sample in self.samples:
-            n = len(sample["messages"])
+        day, start = self.indices[idx]
 
-            if idx < n:
-                return {
-                    "message": sample["messages"][idx],
-                    "orderbook": sample["orderbook"][idx],
-                }
+        sample = self.samples[day]
 
-            idx -= n
+        end = start + self.seq_len
 
-        raise IndexError("Index out of range")
+        return {
+            "message": sample["messages"][start:end],
+            "orderbook": sample["orderbook"][start:end],
+        }
