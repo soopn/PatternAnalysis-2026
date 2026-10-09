@@ -1,5 +1,3 @@
-from typing import LiteralString
-
 import torch.nn as nn
 
 
