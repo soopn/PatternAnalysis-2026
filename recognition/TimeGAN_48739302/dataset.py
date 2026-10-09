@@ -1,14 +1,29 @@
 from pathlib import Path
 
-from torch import tensor, float32
+import torch
 from pandas import read_csv
 from torch.utils.data import Dataset
 
 
 class LOBSTERDataset(Dataset):
-    """Data loader for LOBSTER dataset"""
+    """
+    Sequence-based LOBSTER dataset.
 
-    def __init__(self, root="LOBSTER_DATA", seq_len=100):
+    Each item is a temporal window:
+        message:   [seq_len, 6]
+        orderbook: [seq_len, 4 * levels]
+
+    Time filtering is performed before windows are created, so no
+    sequence can cross a train/validation/test boundary.
+    """
+
+    def __init__(
+        self,
+        root="LOBSTER_DATA",
+        seq_len=100,
+        start_time=None,
+        end_time=None,
+    ):
         self.root = Path(root)
         self.seq_len = seq_len
         self.samples = []
@@ -16,11 +31,11 @@ class LOBSTERDataset(Dataset):
         message_files = sorted(self.root.rglob("*message*.csv"))
 
         for message_file in message_files:
-
             orderbook_name = message_file.name.replace("message", "orderbook")
             orderbook_file = message_file.with_name(orderbook_name)
 
             if not orderbook_file.exists():
+                print(f"Missing orderbook for {message_file}")
                 continue
 
             messages = self._load_csv(message_file)
@@ -28,44 +43,63 @@ class LOBSTERDataset(Dataset):
 
             if len(messages) != len(orderbook):
                 raise ValueError(
-                    f"Row mismatch: {message_file} "
-                    f"({len(messages)}) vs {orderbook_file}"
+                    f"Row mismatch:\n"
+                    f"  {message_file}: {len(messages)}\n"
+                    f"  {orderbook_file}: {len(orderbook)}"
                 )
 
-            self.samples.append(
-                {
-                    "messages": messages,
-                    "orderbook": orderbook,
-                    "symbol": message_file.parent.name,
-                }
+            timestamps = messages[:, 0]
+
+            mask = torch.ones(len(messages), dtype=torch.bool)
+
+            if start_time is not None:
+                mask &= timestamps >= start_time
+
+            if end_time is not None:
+                mask &= timestamps < end_time
+
+            messages = messages[mask]
+            orderbook = orderbook[mask]
+
+            # Not enough data to create even one sequence
+            if len(messages) < seq_len:
+                print(
+                    f"Skipping {message_file.parent.name}: "
+                    f"only {len(messages)} rows after filtering"
+                )
+                continue
+
+            # Create sequence start indices
+            starts = range(0, len(messages) - seq_len + 1)
+
+            for start in starts:
+                end = start + seq_len
+
+                self.samples.append(
+                    (
+                        messages[start:end],
+                        orderbook[start:end],
+                    )
+                )
+
+            print(
+                f"Loaded {message_file.parent.name}: "
+                f"{len(messages)} rows -> "
+                f"{len(messages) - seq_len + 1} sequences"
             )
-
-        # Generate valid sequence starting positions
-        self.indices = []
-
-        for day, sample in enumerate(self.samples):
-            n = len(sample["messages"])
-
-            for start in range(0, n - seq_len + 1, seq_len):
-                self.indices.append((day, start))
 
     @staticmethod
     def _load_csv(path):
         df = read_csv(path)
-        return tensor(df.values, dtype=float32)
+        return torch.tensor(df.values, dtype=torch.float32)
 
     def __len__(self):
-        return len(self.indices)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-
-        day, start = self.indices[idx]
-
-        sample = self.samples[day]
-
-        end = start + self.seq_len
+        messages, orderbook = self.samples[idx]
 
         return {
-            "message": sample["messages"][start:end],
-            "orderbook": sample["orderbook"][start:end],
+            "message": messages,
+            "orderbook": orderbook,
         }
