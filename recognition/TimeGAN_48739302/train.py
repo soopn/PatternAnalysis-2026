@@ -9,6 +9,7 @@ Recommendations:
     - evaluate depth heatmap structural similarity (price levels x time steps) (target SSIM > 0.6)
 """
 
+from pathlib import Path
 import numpy as np
 import random
 import torch
@@ -135,15 +136,9 @@ def run_validation(model, loader):
     return total_loss / max(total_samples, 1)
 
 
-def main(train_loader, eval_loader, feature_dim=40):
+def main(model, train_loader, eval_loader, feature_dim=40):
     """Wrapper to run the actual model training script"""
-    model = TimeGAN(
-        input_dim=feature_dim,
-        hidden_dim=128,
-        noise_dim=64,
-        num_layers=2,
-        seq_len=SEQ_LEN,
-    ).to(DEVICE)
+    Path("checkpoints").mkdir(exist_ok=True)
 
     # best_val_loss = float("inf")
 
@@ -215,6 +210,14 @@ if __name__ == "__main__":
     train_loader, eval_loader, test_loader = make_all_loaders(
         train_dataset, eval_dataset, test_dataset
     )
+
+    model = TimeGAN(
+        input_dim=40,
+        hidden_dim=128,
+        noise_dim=64,
+        num_layers=2,
+        seq_len=SEQ_LEN,
+    ).to(DEVICE)
 
     # Fit on the training period only.
     feature_transform = LOBFeatureTransform(tick_size=100.0)
