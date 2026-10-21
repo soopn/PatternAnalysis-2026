@@ -123,11 +123,19 @@ if __name__ == "__main__":
         num_layers=2,
         seq_len=SEQ_LEN,
     ).to(DEVICE)
+
+    checkpoint = torch.load(
+        "checkpoints/timegan_best.pt",
+        map_location=DEVICE,
+        weights_only=True,
+    )
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(DEVICE)
     model.eval()
 
-    model.load_state_dict(
-        torch.load("checkpoints/timegan_best.pt", weights_only=True)
-    )
+    feature_transform.mean = checkpoint["feature_mean"]
+    feature_transform.std = checkpoint["feature_std"]
 
     with torch.no_grad():
         generated = model.generate(
