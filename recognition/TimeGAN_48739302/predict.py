@@ -8,7 +8,6 @@ from pandas import DataFrame
 
 from dataset import LOBFeatureTransform, LOBSTERDataset
 from modules import TimeGAN
-from train import model
 
 SEQ_LEN = 100
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,7 +54,7 @@ def plot_generated_lob(
     x = generated[sample_idx, timestep]
 
     # Undo feature standardisation.
-    x = feature_transform.inverse_normalize(x)
+    x = feature_transform.inverse_normalise(x)
 
     # Each level contains:
     # [ask price offset, log ask volume, bid price offset, log bid volume]
@@ -147,7 +146,7 @@ if __name__ == "__main__":
         )
         features = feature_transform.inverse_normalise(gen_lob)
 
-    plot_generated_lob(generated, feature_transform)
+    plot_generated_lob(generated.cpu(), feature_transform)
     raw_lob = feature_transform.inverse_normalise(features)
 
     # save to csv
