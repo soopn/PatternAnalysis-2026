@@ -70,21 +70,21 @@ def make_all_datasets():
 
 def make_all_loaders(train_set, eval_set, test_set):
     train_loader = DataLoader(
-        train_dataset,
+        train_set,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=1,
         pin_memory=True,
     )
     eval_loader = DataLoader(
-        eval_dataset,
+        eval_set,
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=1,
         pin_memory=True,
     )
     test_loader = DataLoader(
-        test_dataset,
+        test_set,
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=1,
