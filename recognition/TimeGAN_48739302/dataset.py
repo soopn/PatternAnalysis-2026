@@ -90,7 +90,7 @@ class LOBSTERDataset(Dataset):
 
     @staticmethod
     def _load_csv(path):
-        df = read_csv(path)
+        df = read_csv(path, header=None)
         return torch.tensor(df.values, dtype=torch.float32)
 
     def __len__(self):
