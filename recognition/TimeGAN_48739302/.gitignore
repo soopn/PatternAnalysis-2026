@@ -7,3 +7,4 @@ venv
 LOBSTER_DATA
 checkpoints/*
 logs/*
+out/*
