@@ -74,13 +74,16 @@ class Supervisor(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, hidden_dim, num_layers=2):
+    def __init__(self, hidden_dim, num_layers=2, bidirectional:bool = False):
         super().__init__()
 
         self.rnn = nn.GRU(
-            hidden_dim, hidden_dim, num_layers=num_layers, batch_first=True
+            hidden_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=bidirectional
         )
-        self.fc = nn.Linear(hidden_dim, 1)
+        if bidirectional:
+            self.fc = nn.Linear(hidden_dim * 2, 1)
+        else:
+            self.fc = nn.Linear(hidden_dim, 1)
 
     def forward(self, h):
         d, _ = self.rnn(h)
@@ -99,6 +102,7 @@ class TimeGAN(nn.Module):
         num_layers=2,
         seq_len=100,
         learning_rate=1e-3,
+        bidirec_discrim=False,
         gamma=1.0,
     ):
         super().__init__()
@@ -113,9 +117,10 @@ class TimeGAN(nn.Module):
         self.recoverer = Recoverer(hidden_dim, input_dim, num_layers)
         self.generator = Generator(noise_dim, hidden_dim, num_layers)
         self.supervisor = Supervisor(hidden_dim, num_layers=1)
-        self.discriminator = Discriminator(hidden_dim, num_layers)
+        self.discriminator = Discriminator(hidden_dim, num_layers, bidirectional=bidirec_discrim)
 
         self.mse = nn.MSELoss()
+        # TODO: try sigmoid cross entropy like paper
         self.bce = nn.BCEWithLogitsLoss()
 
         self.optimizer_er = optim.Adam(
@@ -319,14 +324,9 @@ class TimeGAN(nn.Module):
         return loss_d.detach().item()
 
     def train_joint_step(self, x):
-        """Adversarial training step"""
-
-        g_loss = self.train_generator_step(x)
-        er_loss = self.train_embedder_step(x)
+        for _ in range(2):
+            g_loss = self.train_generator_step(x)
+            er_loss = self.train_embedder_step(x)
         d_loss = self.train_discriminator_step(x)
-
-        return {
-            "generator": g_loss,
-            "embedder_recovery": er_loss,
-            "discriminator": d_loss,
-        }
+        return {"generator": g_loss, "embedder_recovery": er_loss,
+                "discriminator": d_loss}
