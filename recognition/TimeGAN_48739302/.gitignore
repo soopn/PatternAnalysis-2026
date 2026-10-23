@@ -2,6 +2,7 @@ __pycache__
 venv
 *.pdf
 
+_*
 *.sh
 
 LOBSTER_DATA
