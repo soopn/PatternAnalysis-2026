@@ -106,6 +106,8 @@ class TimeGAN(nn.Module):
         ac_weight=50.0,
         adv_weight=10.0,
         d_threshold=0.6,
+        g_steps=2,
+        lat_ac_weight=50.0,
     ):
         super().__init__()
 
@@ -120,6 +122,8 @@ class TimeGAN(nn.Module):
         self.ac_weight = ac_weight  # weight of the autocorrelation-matching loss
         self.adv_weight = adv_weight  # weight of the adversarial terms
         self.d_threshold = d_threshold  # D only updates while its loss exceeds this
+        self.g_steps = g_steps  
+        self.lat_ac_weight = lat_ac_weight  
 
         self.embedder = Embedder(input_dim, hidden_dim, num_layers)
         self.recoverer = Recoverer(hidden_dim, input_dim, num_layers)
@@ -318,6 +322,15 @@ class TimeGAN(nn.Module):
             for k in (1, 2)
         )
 
+        # match the latent autocorrelation directly
+        # latents have a tiny variance so small eps
+        loss_ac_h = sum(
+            (self.autocorr(h, k, eps=1e-6) - self.autocorr(h_hat, k, eps=1e-6))
+            .abs()
+            .mean()
+            for k in (1, 2)
+        )
+
         # standard weighting
         loss_g = (
             self.adv_weight * (loss_adv + self.gamma * loss_adv_e)
@@ -326,6 +339,7 @@ class TimeGAN(nn.Module):
             + self.diff_weight * loss_diff
             + self.corr_weight * loss_corr
             + self.ac_weight * loss_ac
+            + self.lat_ac_weight * loss_ac_h
         )
 
         loss_g.backward()
@@ -406,8 +420,10 @@ class TimeGAN(nn.Module):
     def train_joint_step(self, x):
         """Adversarial training step"""
 
-        g_loss = self.train_generator_step(x)
-        er_loss = self.train_embedder_step(x)
+        # update generator and embedder/recoverer twice per discriminator step
+        for _ in range(self.g_steps):
+            g_loss = self.train_generator_step(x)
+            er_loss = self.train_embedder_step(x)
         d_loss = self.train_discriminator_step(x)
 
         return {
