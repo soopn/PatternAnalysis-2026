@@ -30,12 +30,10 @@ class Recoverer(nn.Module):
         )
 
         self.fc = nn.Linear(hidden_dim, output_dim)
-        self.act = nn.Sigmoid()
 
     def forward(self, x):
         x, _ = self.rnn_cell(x)
         x = self.fc(x)
-        x = self.act(x)
         return x
 
 
@@ -102,9 +100,12 @@ class TimeGAN(nn.Module):
         seq_len=100,
         learning_rate=1e-3,
         gamma=1.0,
-        noise_rho=0.6,
+        noise_rho=0.7,
         diff_weight=100.0,
         corr_weight=50.0,
+        ac_weight=50.0,
+        adv_weight=10.0,
+        d_threshold=0.6,
     ):
         super().__init__()
 
@@ -116,6 +117,9 @@ class TimeGAN(nn.Module):
         self.noise_rho = noise_rho  # autocorrelation of the per-step noise
         self.diff_weight = diff_weight  # weight of the roughness-matching loss
         self.corr_weight = corr_weight  # weight of the correlation-matching loss
+        self.ac_weight = ac_weight  # weight of the autocorrelation-matching loss
+        self.adv_weight = adv_weight  # weight of the adversarial terms
+        self.d_threshold = d_threshold  # D only updates while its loss exceeds this
 
         self.embedder = Embedder(input_dim, hidden_dim, num_layers)
         self.recoverer = Recoverer(hidden_dim, input_dim, num_layers)
@@ -180,6 +184,17 @@ class TimeGAN(nn.Module):
         x = x - x.mean(dim=0, keepdim=True)
         x = x / (x.std(dim=0, unbiased=False, keepdim=True) + eps)
         return x.T @ x / x.shape[0]
+
+    @staticmethod
+    def autocorr(x, lag, eps=1e-3):
+        """Lag-`lag` autocorrelation per feature, pooled over batch and time.
+        x: [B, T, D] -> [D]. Alternating series give ~-1, persistent ones ~+1."""
+        a, b = x[:, :-lag], x[:, lag:]
+        a = a - a.mean(dim=(0, 1), keepdim=True)
+        b = b - b.mean(dim=(0, 1), keepdim=True)
+        num = (a * b).mean(dim=(0, 1))
+        den = torch.sqrt((a * a).mean(dim=(0, 1)) * (b * b).mean(dim=(0, 1)))
+        return num / (den + eps)
 
     @staticmethod
     def set_requires_grad(module, enabled):
@@ -295,14 +310,22 @@ class TimeGAN(nn.Module):
             self.corr_matrix(x) - self.corr_matrix(x_hat)
         ).abs().mean()
 
+        # Match autocorrelation (lags 1, 2). Mean |difference| alone can be
+        # satisfied by a perfectly alternating series (autocorr -1), which is
+        # what the generator did for the inter-event time.
+        loss_ac = sum(
+            (self.autocorr(x, k) - self.autocorr(x_hat, k)).abs().mean()
+            for k in (1, 2)
+        )
+
         # standard weighting
         loss_g = (
-            loss_adv
-            + self.gamma * loss_adv_e
+            self.adv_weight * (loss_adv + self.gamma * loss_adv_e)
             + 100.0 * torch.sqrt(loss_supervised + 1e-8)
             + 100.0 * loss_moments
             + self.diff_weight * loss_diff
             + self.corr_weight * loss_corr
+            + self.ac_weight * loss_ac
         )
 
         loss_g.backward()
@@ -372,8 +395,9 @@ class TimeGAN(nn.Module):
             torch.sigmoid(y_fake).mean().item(),
         )
 
-        # bound discriminator training
-        if loss_d.item() > 0.15:
+        # Bound discriminator training: skip the update while D is already
+        # winning clearly (sum of three BCE terms; chance level is ~2.08).
+        if loss_d.item() > self.d_threshold:
             loss_d.backward()
             self.optimizer_d.step()
 
