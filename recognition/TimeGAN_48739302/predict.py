@@ -101,9 +101,10 @@ def structure_report(features):
 
     spread = ask_gap[:, 0] + bid_gap[:, 0]
     tight = spread < 0.5  # rounds to < 1 tick
-    sub_tick = ((ask_gap[:, 1:] < 0.5) & ask_ne[:, 1:]).any(axis=1) | (
-        (bid_gap[:, 1:] < 0.5) & bid_ne[:, 1:]
-    ).any(axis=1)
+    sub_tick = (
+        ((ask_gap[:, 1:] < 0.5) & ask_ne[:, 1:]).any(axis=1)
+        | ((bid_gap[:, 1:] < 0.5) & bid_ne[:, 1:]).any(axis=1)
+    )
     neg_vol = (lv[..., 1] < 0).any(axis=1) | (lv[..., 3] < 0).any(axis=1)
     empty_l1 = ~ask_ne[:, 0] | ~bid_ne[:, 0]
 
@@ -144,7 +145,7 @@ def decode_features(features, start_mid_ticks):
     bid_vol[bid_vol < EMPTY_VOL] = 0
 
     # Midprice path on the half-tick grid.
-    d_mid = np.rint(f[..., MID_FEATURE] * 2.0) / 2.0
+    d_mid = np.rint(np.sinh(f[..., MID_FEATURE]) * 2.0) / 2.0  # undo asinh
     d_mid[:, 0] = 0.0
     mid = start_mid_ticks[:, None] + np.cumsum(d_mid, axis=1)
 
@@ -194,9 +195,7 @@ def to_lobster_rows(dec, tick_size=TICK_SIZE):
     return raw.reshape(n, t, 40)
 
 
-def plot_generated_lob(
-    dec, sample_idx=0, timestep=0, path="figs/generated_lob.png"
-):
+def plot_generated_lob(dec, sample_idx=0, timestep=0, path="figs/generated_lob.png"):
     mid = dec["mid"][sample_idx, timestep]
     ask_off = dec["ask_price"][sample_idx, timestep] - mid
     bid_off = dec["bid_price"][sample_idx, timestep] - mid  # negative
@@ -204,20 +203,10 @@ def plot_generated_lob(
     bid_vol = dec["bid_vol"][sample_idx, timestep]
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.barh(
-        ask_off[ask_vol > 0],
-        ask_vol[ask_vol > 0],
-        height=0.3,
-        label="Ask",
-        alpha=0.7,
-    )
-    ax.barh(
-        bid_off[bid_vol > 0],
-        bid_vol[bid_vol > 0],
-        height=0.3,
-        label="Bid",
-        alpha=0.7,
-    )
+    ax.barh(ask_off[ask_vol > 0], ask_vol[ask_vol > 0], height=0.3,
+            label="Ask", alpha=0.7)
+    ax.barh(bid_off[bid_vol > 0], bid_vol[bid_vol > 0], height=0.3,
+            label="Bid", alpha=0.7)
     ax.axhline(0, linestyle="--", linewidth=1)
     ax.set_xlabel("Volume (shares)")
     ax.set_ylabel("Price offset from midprice (ticks)")

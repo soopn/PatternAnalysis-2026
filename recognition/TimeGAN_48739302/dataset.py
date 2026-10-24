@@ -224,7 +224,9 @@ class LOBFeatureTransform:
 
         # Midprice change in ticks. First step of a window has no
         # predecessor inside the window, so it is 0.
-        d_mid = torch.diff(mid, dim=-1, prepend=mid[..., :1]) / self.tick_size
+        d_mid = torch.asinh(
+            torch.diff(mid, dim=-1, prepend=mid[..., :1]) / self.tick_size
+        )
 
         # Inter-event time (precomputed in float64 by the dataset).
         dt = message[..., DT_COL].clamp(min=0)
@@ -235,7 +237,7 @@ class LOBFeatureTransform:
         )
 
     def fit(self, feature_batches):
-        """Fit standardisation statistics on unstandardised training features"""
+        """Fit standardisation statistics on unstandardised training features."""
         total = None
         total_sq = None
         count = 0

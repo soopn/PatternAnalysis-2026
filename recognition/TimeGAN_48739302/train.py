@@ -17,7 +17,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler, Subset
-import time
 
 from dataset import N_FEATURES, LOBFeatureTransform, LOBSTERDataset
 from modules import TimeGAN
@@ -96,15 +95,25 @@ def raw_feature_batches(loader, transform):
 
 
 def moment_gap(real, fake):
-    """Mean |difference| of per-timestep, per-feature means and stds
-    (standardised units), same statistics as the generator's moment loss."""
+    """Per-timestep mean/std gap (as in the generator's moment loss) plus a
+    roughness gap and a correlation-matrix gap, all in standardised units.
+    The extra terms stop a flickering or decorrelated generator from being
+    picked as the 'best' checkpoint."""
     d_mean = (real.mean(0) - fake.mean(0)).abs().mean()
     d_std = (real.std(0) - fake.std(0)).abs().mean()
-    return (d_mean + d_std).item()
+    dx_real = (real[:, 1:] - real[:, :-1]).abs().mean(dim=(0, 1))
+    dx_fake = (fake[:, 1:] - fake[:, :-1]).abs().mean(dim=(0, 1))
+    d_rough = (dx_real - dx_fake).abs().mean()
+    d_corr = (
+        (TimeGAN.corr_matrix(real) - TimeGAN.corr_matrix(fake)).abs().mean()
+    )
+    return (d_mean + d_std + d_rough + d_corr).item()
 
 
 @torch.no_grad()
 def run_validation(model, loader, transform, with_generation=False):
+    """Reconstruction MSE on real eval data and, optionally, how close the
+    generated feature moments are to the real ones."""
     model.eval()
 
     total, n = 0.0, 0
@@ -141,8 +150,7 @@ def save_checkpoint(model, transform, path, **extra):
 def main(model, train_loader, eval_loader, transform):
     CKPT_DIR.mkdir(exist_ok=True)
 
-    # embedder + recoverer autoencoder
-    encoder_start = time.time()
+    # 1) embedder + recoverer autoencoder
     for epoch in range(AUTOENCODER_EPOCHS):
         model.train()
         losses = [
@@ -154,10 +162,8 @@ def main(model, train_loader, eval_loader, transform):
             f"[Autoencoder] {epoch + 1:03d} "
             f"train={np.mean(losses):.6f} val_reconstruction={val:.6f}"
         )
-    encoder_end = time.time()
 
-    # supervisor learns latent temporal dynamics
-    supervisor_start = time.time()
+    # 2) supervisor learns latent temporal dynamics
     for epoch in range(SUPERVISOR_EPOCHS):
         model.train()
         losses = [
@@ -165,20 +171,21 @@ def main(model, train_loader, eval_loader, transform):
             for x in get_batches(train_loader, transform)
         ]
         print(f"[Supervisor] {epoch + 1:03d} train={np.mean(losses):.6f}")
-    supervisor_end = time.time()
 
-    # joint adversarial training
-    joint_start = time.time()
+    # 3) joint adversarial training
     best_gap = float("inf")
     for epoch in range(JOINT_EPOCHS):
         model.train()
         g_losses, er_losses, d_losses = [], [], []
+        p_real, p_fake = [], []
 
         for x in get_batches(train_loader, transform):
             losses = model.train_joint_step(x)
             g_losses.append(losses["generator"])
             er_losses.append(losses["embedder_recovery"])
             d_losses.append(losses["discriminator"])
+            p_real.append(losses["d_real"])
+            p_fake.append(losses["d_fake"])
 
         val, gap = run_validation(
             model, eval_loader, transform, with_generation=True
@@ -188,6 +195,8 @@ def main(model, train_loader, eval_loader, transform):
             f"G={np.mean(g_losses):.5f} "
             f"E/R={np.mean(er_losses):.5f} "
             f"D={np.mean(d_losses):.5f} "
+            f"P(real|real)={np.mean(p_real):.2f} "
+            f"P(real|fake)={np.mean(p_fake):.2f} "
             f"val_reconstruction={val:.5f} moment_gap={gap:.5f}"
         )
 
@@ -210,7 +219,6 @@ def main(model, train_loader, eval_loader, transform):
                 epoch=epoch + 1,
                 moment_gap=gap,
             )
-    joint_end = time.time()
 
     save_checkpoint(
         model,
@@ -219,12 +227,6 @@ def main(model, train_loader, eval_loader, transform):
         epoch=JOINT_EPOCHS,
     )
     print(f"Done. Best moment_gap={best_gap:.5f}")
-    print(
-        "Training Durations:\n"
-        + f"  Autoencoder: {encoder_end-encoder_start}s\n"
-        + f"  Supervisor: {supervisor_end-supervisor_start}s\n"
-        + f"  Joint: {joint_end-joint_start}s\n"
-    )
 
 
 if __name__ == "__main__":
@@ -258,8 +260,6 @@ if __name__ == "__main__":
         noise_dim=64,
         num_layers=2,
         seq_len=SEQ_LEN,
-        # TODO: try bidirectional discriminator
-        # bidirec_discrim=True,
     ).to(DEVICE)
 
     main(model, train_loader, eval_loader, transform)
