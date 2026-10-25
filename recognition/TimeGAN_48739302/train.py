@@ -40,7 +40,10 @@ JOINT_EPOCHS = 200
 STEPS_PER_EPOCH = 200
 EVAL_WINDOWS = 20 * BATCH_SIZE  # strided subset of the eval set
 FIT_STRIDE = 10  # subsample for fitting the scaler
-CHECKPOINT_EVERY = 25  # joint epochs
+CHECKPOINT_EVERY = 10
+MIN_BEST_EPOCH = (
+    30  # ignore very early epochs when picking the 'best' checkpoint
+)
 
 CKPT_DIR = Path("checkpoints")
 
@@ -96,7 +99,7 @@ def raw_feature_batches(loader, transform):
 
 def moment_gap(real, fake):
     """Per-timestep mean/std gap (as in the generator's moment loss) plus a
-    roughness gap and a correlation-matrix gap, all in standardised units.
+    roughness, correlation-matrix and autocorrelation gaps, all in standardised units.
     The extra terms stop a flickering or decorrelated generator from being
     picked as the 'best' checkpoint."""
     d_mean = (real.mean(0) - fake.mean(0)).abs().mean()
@@ -154,7 +157,7 @@ def save_checkpoint(model, transform, path, **extra):
 def main(model, train_loader, eval_loader, transform):
     CKPT_DIR.mkdir(exist_ok=True)
 
-    # 1) embedder + recoverer autoencoder
+    # embedder + recoverer autoencoder
     for epoch in range(AUTOENCODER_EPOCHS):
         model.train()
         losses = [
@@ -167,7 +170,7 @@ def main(model, train_loader, eval_loader, transform):
             f"train={np.mean(losses):.6f} val_reconstruction={val:.6f}"
         )
 
-    # 2) supervisor learns latent temporal dynamics
+    # supervisor learns latent temporal dynamics
     for epoch in range(SUPERVISOR_EPOCHS):
         model.train()
         losses = [
@@ -176,7 +179,8 @@ def main(model, train_loader, eval_loader, transform):
         ]
         print(f"[Supervisor] {epoch + 1:03d} train={np.mean(losses):.6f}")
 
-    # 3) joint adversarial training
+    # joint adversarial training
+    model.init_ema()
     best_gap = float("inf")
     for epoch in range(JOINT_EPOCHS):
         model.train()
@@ -206,7 +210,7 @@ def main(model, train_loader, eval_loader, transform):
 
         # "best" = generated feature moments closest to real eval data.
         # Reconstruction MSE says nothing about generation quality.
-        if gap < best_gap:
+        if gap < best_gap and (epoch + 1) >= MIN_BEST_EPOCH:
             best_gap = gap
             save_checkpoint(
                 model,

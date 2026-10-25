@@ -1,3 +1,5 @@
+import copy
+
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -106,8 +108,9 @@ class TimeGAN(nn.Module):
         ac_weight=50.0,
         adv_weight=10.0,
         d_threshold=0.6,
-        g_steps=2,
+        gen_steps=2,
         lat_ac_weight=50.0,
+        ema_decay=0.999,
     ):
         super().__init__()
 
@@ -122,14 +125,27 @@ class TimeGAN(nn.Module):
         self.ac_weight = ac_weight  # weight of the autocorrelation-matching loss
         self.adv_weight = adv_weight  # weight of the adversarial terms
         self.d_threshold = d_threshold  # D only updates while its loss exceeds this
-        self.g_steps = g_steps  
-        self.lat_ac_weight = lat_ac_weight  
+        self.gen_steps = gen_steps  
+        self.lat_ac_weight = lat_ac_weight
 
         self.embedder = Embedder(input_dim, hidden_dim, num_layers)
         self.recoverer = Recoverer(hidden_dim, input_dim, num_layers)
         self.generator = Generator(noise_dim, hidden_dim, num_layers)
         self.supervisor = Supervisor(hidden_dim, num_layers=1)
         self.discriminator = Discriminator(hidden_dim, num_layers)
+
+        # ema for generation path of generator, supervisor, recoverer 
+        self.ema_decay = ema_decay
+        self.ema = nn.ModuleDict(
+            {
+                "generator": copy.deepcopy(self.generator),
+                "supervisor": copy.deepcopy(self.supervisor),
+                "recoverer": copy.deepcopy(self.recoverer),
+            }
+        )
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+        self.register_buffer("ema_ready", torch.zeros(1))
 
         self.mse = nn.MSELoss()
         self.bce = nn.BCEWithLogitsLoss()
@@ -209,16 +225,43 @@ class TimeGAN(nn.Module):
         h = self.embedder(x)
         return self.recoverer(h)
 
-    def generate(self, batch_size, seq_len=None):
+    @torch.no_grad()
+    def init_ema(self):
+        """Copy the current weights into the EMA copies"""
+        for name in self.ema:
+            self.ema[name].load_state_dict(getattr(self, name).state_dict())
+        self.ema_ready.fill_(1.0)
+
+    @torch.no_grad()
+    def update_ema(self):
+        d = self.ema_decay
+        for name, shadow in self.ema.items():
+            for p_ema, p in zip(
+                shadow.parameters(), getattr(self, name).parameters()
+            ):
+                p_ema.mul_(d).add_(p.detach(), alpha=1.0 - d)
+
+    def nets(self, use_ema=True):
+        """(generator, supervisor, recoverer) used for sampling."""
+        if use_ema and self.ema_ready.item() > 0:
+            return (
+                self.ema["generator"],
+                self.ema["supervisor"],
+                self.ema["recoverer"],
+            )
+        return self.generator, self.supervisor, self.recoverer
+
+    def generate(self, batch_size, seq_len=None, use_ema=True):
         if seq_len is None:
             seq_len = self.seq_len
 
         device = next(self.parameters()).device
         z = self.sample_noise(batch_size, seq_len, device)
 
-        e_hat = self.generator(z)
-        h_hat = self.supervisor(e_hat)
-        return self.recoverer(h_hat)
+        generator, supervisor, recoverer = self.nets(use_ema)
+        e_hat = generator(z)
+        h_hat = supervisor(e_hat)
+        return recoverer(h_hat)
 
     def pretrain_autoencoder(self, x):
         self.optimizer_er.zero_grad(set_to_none=True)
@@ -322,7 +365,7 @@ class TimeGAN(nn.Module):
             for k in (1, 2)
         )
 
-        # match the latent autocorrelation directly
+        # # match the latent autocorrelation directly
         # latents have a tiny variance so small eps
         loss_ac_h = sum(
             (self.autocorr(h, k, eps=1e-6) - self.autocorr(h_hat, k, eps=1e-6))
@@ -421,10 +464,12 @@ class TimeGAN(nn.Module):
         """Adversarial training step"""
 
         # update generator and embedder/recoverer twice per discriminator step
-        for _ in range(self.g_steps):
+        for _ in range(self.gen_steps):
             g_loss = self.train_generator_step(x)
             er_loss = self.train_embedder_step(x)
         d_loss = self.train_discriminator_step(x)
+        if self.ema_ready.item() > 0:
+            self.update_ema()
 
         return {
             "generator": g_loss,
