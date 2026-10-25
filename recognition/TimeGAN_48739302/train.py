@@ -107,7 +107,11 @@ def moment_gap(real, fake):
     d_corr = (
         (TimeGAN.corr_matrix(real) - TimeGAN.corr_matrix(fake)).abs().mean()
     )
-    return (d_mean + d_std + d_rough + d_corr).item()
+    d_ac = sum(
+        (TimeGAN.autocorr(real, k) - TimeGAN.autocorr(fake, k)).abs().mean()
+        for k in (1, 2)
+    )
+    return (d_mean + d_std + d_rough + d_corr + d_ac).item()
 
 
 @torch.no_grad()
