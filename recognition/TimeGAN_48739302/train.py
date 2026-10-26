@@ -45,7 +45,9 @@ MIN_BEST_EPOCH = (
     30  # ignore very early epochs when picking the 'best' checkpoint
 )
 
-CKPT_DIR = Path("checkpoints")
+# Edit these settings before pasting this file into a Jupyter cell.
+CKPT_DIR = Path("checkpoints/reconstruction_events_v1")
+RECONSTRUCTION_EVENT_WEIGHT = 1.0  # 0.0 gives the MSE-only reconstruction baseline
 
 random.seed(RAND_SEED)
 np.random.seed(RAND_SEED)
@@ -56,7 +58,7 @@ if torch.cuda.is_available():
 
 def strided_subset(dataset, max_items):
     """Evenly spaced windows across the whole period."""
-    stride = max(1, len(dataset) // max_items)
+    stride = max(1, (len(dataset) + max_items - 1) // max_items)
     return Subset(dataset, range(0, len(dataset), stride))
 
 
@@ -114,7 +116,17 @@ def moment_gap(real, fake):
         (TimeGAN.autocorr(real, k) - TimeGAN.autocorr(fake, k)).abs().mean()
         for k in (1, 2)
     )
-    return (d_mean + d_std + d_rough + d_corr + d_ac).item()
+    rc = real - real.mean(dim=1, keepdim=True)
+    fc = fake - fake.mean(dim=1, keepdim=True)
+    d_within = (
+        (
+            rc.pow(2).mean(dim=1).sqrt().mean(dim=0)
+            - fc.pow(2).mean(dim=1).sqrt().mean(dim=0)
+        )
+        .abs()
+        .mean()
+    )
+    return (d_mean + d_std + d_rough + d_corr + d_ac + d_within).item()
 
 
 @torch.no_grad()
@@ -124,10 +136,13 @@ def run_validation(model, loader, transform, with_generation=False):
     model.eval()
 
     total, n = 0.0, 0
+    event_totals = {}
     real = []
     for x in get_batches(loader, transform):
         x_hat = model.reconstruct(x)
         total += F.mse_loss(x_hat, x).item() * x.size(0)
+        for name, value in model.reconstruction_event_losses(x, x_hat, model.feature_std).items():
+            event_totals[name] = event_totals.get(name, 0.0) + value.item() * x.size(0)
         n += x.size(0)
         if with_generation:
             real.append(x)
@@ -135,9 +150,25 @@ def run_validation(model, loader, transform, with_generation=False):
     gap = None
     if with_generation and real:
         real = torch.cat(real)
-        fake = model.generate(real.size(0), real.size(1))
-        gap = moment_gap(real, fake)
+        devices = [DEVICE.index or 0] if DEVICE.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(RAND_SEED)
+            fake = torch.cat(
+                [
+                    model.generate(min(256, len(real) - i), real.size(1) + 20)[
+                        :, 20:
+                    ]
+                    for i in range(0, len(real), 256)
+                ]
+            )
 
+        gap = moment_gap(real, fake)
+        gap += model.event_losses(real, fake, model.feature_std).item()
+        gap += model.volatility_loss(
+            real, fake, model.feature_mean, model.feature_std
+        ).item()
+
+    model.last_validation_events = {name: value / max(n, 1) for name, value in event_totals.items()}
     model.train()
     return total / max(n, 1), gap
 
@@ -148,6 +179,10 @@ def save_checkpoint(model, transform, path, **extra):
             "model_state_dict": model.state_dict(),
             "feature_mean": transform.mean,
             "feature_std": transform.std,
+            "validation_version": "events_v1_burn20",
+            "loss_weights": {"events": 25.0, "volatility": 25.0,
+                             "reconstruction_events": model.reconstruction_event_weight},
+            "reconstruction_version": "paired_volume_events_v1",
             **extra,
         },
         path,
@@ -155,7 +190,7 @@ def save_checkpoint(model, transform, path, **extra):
 
 
 def main(model, train_loader, eval_loader, transform):
-    CKPT_DIR.mkdir(exist_ok=True)
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
     # embedder + recoverer autoencoder
     for epoch in range(AUTOENCODER_EPOCHS):
@@ -168,6 +203,7 @@ def main(model, train_loader, eval_loader, transform):
         print(
             f"[Autoencoder] {epoch + 1:03d} "
             f"train={np.mean(losses):.6f} val_reconstruction={val:.6f}"
+            + " " + " ".join(f"val_event_{k}={v:.5f}" for k, v in model.last_validation_events.items())
         )
 
     # supervisor learns latent temporal dynamics
@@ -206,6 +242,7 @@ def main(model, train_loader, eval_loader, transform):
             f"P(real|real)={np.mean(p_real):.2f} "
             f"P(real|fake)={np.mean(p_fake):.2f} "
             f"val_reconstruction={val:.5f} moment_gap={gap:.5f}"
+            + " " + " ".join(f"val_event_{k}={v:.5f}" for k, v in model.last_validation_events.items())
         )
 
         # "best" = generated feature moments closest to real eval data.
@@ -238,6 +275,13 @@ def main(model, train_loader, eval_loader, transform):
 
 
 if __name__ == "__main__":
+    if RECONSTRUCTION_EVENT_WEIGHT < 0:
+        raise ValueError("RECONSTRUCTION_EVENT_WEIGHT must be nonnegative")
+    for name in ("AUTOENCODER_EPOCHS", "SUPERVISOR_EPOCHS", "JOINT_EPOCHS",
+                 "STEPS_PER_EPOCH", "EVAL_WINDOWS"):
+        if globals()[name] < 1:
+            raise ValueError(f"{name} must be positive")
+    MIN_BEST_EPOCH = min(MIN_BEST_EPOCH, JOINT_EPOCHS)
     train_set = LOBSTERDataset(
         root="LOBSTER_DATA",
         seq_len=SEQ_LEN,
@@ -268,6 +312,9 @@ if __name__ == "__main__":
         noise_dim=64,
         num_layers=2,
         seq_len=SEQ_LEN,
+        reconstruction_event_weight=RECONSTRUCTION_EVENT_WEIGHT,
     ).to(DEVICE)
 
+    model.feature_mean.copy_(transform.mean.to(DEVICE))
+    model.feature_std.copy_(transform.std.to(DEVICE))
     main(model, train_loader, eval_loader, transform)

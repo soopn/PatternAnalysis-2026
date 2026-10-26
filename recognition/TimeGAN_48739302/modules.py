@@ -111,6 +111,8 @@ class TimeGAN(nn.Module):
         gen_steps=2,
         lat_ac_weight=50.0,
         ema_decay=0.999,
+        within_weight=50.0,
+        reconstruction_event_weight=1.0,
     ):
         super().__init__()
 
@@ -125,8 +127,10 @@ class TimeGAN(nn.Module):
         self.ac_weight = ac_weight  # weight of the autocorrelation-matching loss
         self.adv_weight = adv_weight  # weight of the adversarial terms
         self.d_threshold = d_threshold  # D only updates while its loss exceeds this
-        self.gen_steps = gen_steps  
+        self.gen_steps = gen_steps
         self.lat_ac_weight = lat_ac_weight
+        self.within_weight = within_weight  # within-window std / correlation matching
+        self.reconstruction_event_weight = reconstruction_event_weight
 
         self.embedder = Embedder(input_dim, hidden_dim, num_layers)
         self.recoverer = Recoverer(hidden_dim, input_dim, num_layers)
@@ -147,6 +151,8 @@ class TimeGAN(nn.Module):
             p.requires_grad_(False)
         self.register_buffer("ema_ready", torch.zeros(1))
 
+        self.register_buffer("feature_mean", torch.zeros(input_dim), persistent=False)
+        self.register_buffer("feature_std", torch.ones(input_dim), persistent=False)
         self.mse = nn.MSELoss()
         self.bce = nn.BCEWithLogitsLoss()
 
@@ -217,6 +223,67 @@ class TimeGAN(nn.Module):
         return num / (den + eps)
 
     @staticmethod
+    def event_losses(real, fake, feature_std):
+        """Distribution losses in original feature units; no hard rounding.
+
+        A soft change indicator separates event frequency from jump size.
+        Sorted samples compare empirical distributions without paired windows.
+        """
+        vol = [i for i in range(40) if i % 4 in (1, 3)]
+        r, f = real * feature_std, fake * feature_std
+        dr, df = r[:, 1:, vol] - r[:, :-1, vol], f[:, 1:, vol] - f[:, :-1, vol]
+        # Real log-volume changes are exactly zero at held levels.
+        gr, gf = 1 - torch.exp(-dr.abs() / 0.05), 1 - torch.exp(-df.abs() / 0.05)
+        frequency = (gr.mean((0, 1)) - gf.mean((0, 1))).abs().mean()
+        jumps = (dr.abs().reshape(-1, 20).sort(0).values
+                 - df.abs().reshape(-1, 20).sort(0).values).abs().mean()
+        coordination = (gr.sum(-1).flatten().sort().values
+                        - gf.sum(-1).flatten().sort().values).abs().mean() / 20
+        within = (r.std(1, unbiased=False).sort(0).values
+                  - f.std(1, unbiased=False).sort(0).values).abs().mean()
+        timing = (r[..., 41].flatten().sort().values
+                  - f[..., 41].flatten().sort().values).abs().mean()
+        return frequency + jumps + coordination + within + timing
+
+    @staticmethod
+    def reconstruction_event_losses(real, reconstructed, feature_std):
+        """Paired volume-event losses in original log-volume units.
+
+        Unlike generator distribution matching, reconstruction must preserve
+        the location and sign of each event. Balance held and changed entries
+        so the many unchanged levels cannot hide attenuated jumps.
+        """
+        vol = [i for i in range(40) if i % 4 in (1, 3)]
+        dr = torch.diff(real[..., vol], dim=1) * feature_std[vol]
+        df = torch.diff(reconstructed[..., vol], dim=1) * feature_std[vol]
+        if dr.numel() == 0:
+            zero = reconstructed.sum() * 0.0
+            return dict.fromkeys(("frequency", "jumps", "coordination", "alignment"), zero)
+        gr = -torch.expm1(-dr.abs() / 0.05)
+        gf = -torch.expm1(-df.abs() / 0.05)
+        changed = (dr.abs() > 1e-6).to(dr.dtype)
+        error = (dr - df).abs()
+        jump_error = (error * changed).sum() / changed.sum().clamp_min(1)
+        hold_error = (error * (1 - changed)).sum() / (1 - changed).sum().clamp_min(1)
+        return {
+            "frequency": (gr.mean((0, 1)) - gf.mean((0, 1))).abs().mean(),
+            "jumps": jump_error + hold_error,
+            "coordination": (gr.sum(-1) - gf.sum(-1)).abs().mean() / len(vol),
+            "alignment": (gr - gf).abs().mean(),
+        }
+
+    @staticmethod
+    def volatility_loss(real, fake, feature_mean, feature_std):
+        # Invert the asinh midprice feature before measuring volatility.
+        ar = torch.sinh(real[..., 40:41] * feature_std[40] + feature_mean[40]).abs()
+        af = torch.sinh((fake[..., 40:41] * feature_std[40] + feature_mean[40]).clamp(-10, 10)).abs()
+        return torch.stack([
+            (TimeGAN.autocorr(ar[:, 1:], k, eps=1e-6)
+             - TimeGAN.autocorr(af[:, 1:], k, eps=1e-6)).abs().mean()
+            for k in range(1, min(11, real.shape[1] - 1))
+        ]).mean()
+
+    @staticmethod
     def set_requires_grad(module, enabled):
         for parameter in module.parameters():
             parameter.requires_grad_(enabled)
@@ -267,7 +334,8 @@ class TimeGAN(nn.Module):
         self.optimizer_er.zero_grad(set_to_none=True)
 
         x_tilde = self.reconstruct(x)
-        loss = self.mse(x_tilde, x)
+        events = self.reconstruction_event_losses(x, x_tilde, self.feature_std)
+        loss = self.mse(x_tilde, x) + self.reconstruction_event_weight * sum(events.values())
 
         loss.backward()
         self.optimizer_er.step()
@@ -374,7 +442,19 @@ class TimeGAN(nn.Module):
             for k in (1, 2)
         )
 
+        # Within window statistics. Per-timestep moments only see variance
+        # across windows, not how much a series moves inside one window
+        xc = x - x.mean(dim=1, keepdim=True)
+        xc_hat = x_hat - x_hat.mean(dim=1, keepdim=True)
+        std_w = torch.sqrt(xc.pow(2).mean(dim=1) + 1e-6).mean(dim=0)
+        std_w_hat = torch.sqrt(xc_hat.pow(2).mean(dim=1) + 1e-6).mean(dim=0)
+        loss_within = (std_w - std_w_hat).abs().mean() + (
+            self.corr_matrix(xc) - self.corr_matrix(xc_hat)
+        ).abs().mean()
+
         # standard weighting
+        loss_events = self.event_losses(x, x_hat, self.feature_std)
+        loss_volatility = self.volatility_loss(x, x_hat, self.feature_mean, self.feature_std)
         loss_g = (
             self.adv_weight * (loss_adv + self.gamma * loss_adv_e)
             + 100.0 * torch.sqrt(loss_supervised + 1e-8)
@@ -383,6 +463,9 @@ class TimeGAN(nn.Module):
             + self.corr_weight * loss_corr
             + self.ac_weight * loss_ac
             + self.lat_ac_weight * loss_ac_h
+            + self.within_weight * loss_within
+            + 25.0 * loss_events
+            + 25.0 * loss_volatility
         )
 
         loss_g.backward()
@@ -414,6 +497,9 @@ class TimeGAN(nn.Module):
         loss_er = (
             10.0 * torch.sqrt(loss_reconstruction + 1e-8)
             + 0.1 * loss_supervised
+            + self.reconstruction_event_weight * sum(
+                self.reconstruction_event_losses(x, x_tilde, self.feature_std).values()
+            )
         )
 
         loss_er.backward()
