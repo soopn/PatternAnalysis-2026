@@ -61,16 +61,14 @@ def real_period():
 
 
 def load_model(path=CHECKPOINT):
-    model = TimeGAN(
-        input_dim=N_FEATURES,
-        hidden_dim=128,
-        noise_dim=64,
-        num_layers=2,
-        seq_len=SEQ_LEN,
-    ).to(DEVICE)
     global SPARSE_PARAMS
     SPARSE_PARAMS = None
     checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
+    config = checkpoint.get("model_config", {
+        "input_dim": N_FEATURES, "hidden_dim": 128, "noise_dim": 64,
+        "num_layers": 2, "seq_len": SEQ_LEN,
+    })
+    model = TimeGAN(**config).to(DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
