@@ -18,6 +18,8 @@ Midprice paths are the cumulative sum of the generated midprice changes,
 anchored at the first midprice of random real test windows.
 """
 
+import argparse
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -33,19 +35,29 @@ from dataset import (
     LOBFeatureTransform,
     LOBSTERDataset,
 )
+import sparsify
 from modules import TimeGAN
 
 SEQ_LEN = 100
-N_SAMPLES = 1
+N_SAMPLES = 1000
 TICK_SIZE = 100.0  # $0.01 * 1e4
 TEST_START, TEST_END = 52_200, 57_600
 CHECKPOINT = "checkpoints/timegan_best.pt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEED = 123
 EMPTY_VOL = 0.5  # volumes are integers >= 1, so < 0.5 means "empty level"
+PERIODS = {
+    "train": (34_200, 46_800),
+    "eval": (46_800, 52_200),
+    "test": (TEST_START, TEST_END),
+}
+BURN_IN = 20  # extra leading steps generated and dropped (GRU warm-up transient)
+SPARSE_PARAMS = None  # set by enable_sparsify(); see sparsify.py
 
-# extra leading steps generated and dropped (GRU warm-up transient)
-BURN_IN = 20
+
+def real_period():
+    """(start, end) of the real data to compare with; REAL_PERIOD=train|eval|test."""
+    return PERIODS[os.environ.get("REAL_PERIOD", "test")]
 
 
 def load_model(path=CHECKPOINT):
@@ -56,6 +68,8 @@ def load_model(path=CHECKPOINT):
         num_layers=2,
         seq_len=SEQ_LEN,
     ).to(DEVICE)
+    global SPARSE_PARAMS
+    SPARSE_PARAMS = None
     checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -63,14 +77,44 @@ def load_model(path=CHECKPOINT):
     transform = LOBFeatureTransform(tick_size=TICK_SIZE)
     transform.mean = checkpoint["feature_mean"].cpu()
     transform.std = checkpoint["feature_std"].cpu()
+    model.feature_mean.copy_(transform.mean.to(DEVICE))
+    model.feature_std.copy_(transform.std.to(DEVICE))
+    if os.environ.get("SPARSIFY") == "1":  # e.g. SPARSIFY=1 python evaluate.py
+        enable_sparsify(model, transform)
     return model, transform
 
 
+def enable_sparsify(model, transform, n=2000):
+    """Calibrate the hold filter against real TRAINING-period windows so every
+    later generate_sequences() call returns event-sparse features."""
+    global SPARSE_PARAMS
+    ds = LOBSTERDataset(
+        root="LOBSTER_DATA", seq_len=SEQ_LEN, start_time=34_200, end_time=46_800
+    )
+    idx = np.linspace(0, len(ds) - 1, n).astype(int)
+    ob = torch.stack([ds[int(i)]["orderbook"] for i in idx])
+    ms = torch.stack([ds[int(i)]["message"] for i in idx])
+    real = transform.transform_raw(ob, ms).numpy()
+    devices = [DEVICE.index or 0] if DEVICE.type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(SEED + 1)
+        raw = generate_sequences(model, transform, n, SEQ_LEN, sparse=False)
+    SPARSE_PARAMS = sparsify.calibrate(raw, real)
+    after = sparsify.apply(raw, SPARSE_PARAMS, seed=1)
+    for name, f in (("real", real), ("generated", raw), ("sparsified", after)):
+        lat = sparsify.lattice_stats(f)
+        print(
+            f"sparsify {name:<10s} unchanged {sparsify.unchanged_share(f).mean():.3f}  "
+            f"mult100 {lat['mult100']:.3f}  mult10 {lat['mult10']:.3f}  "
+            f"1-tick gaps {lat['gap1']:.3f}"
+        )
+
+
 @torch.no_grad()
-def generate_sequences(
-    model, transform, n_samples=100, seq_len=SEQ_LEN, burn_in=BURN_IN
-):
-    """Sample with the model's own noise. The generator's GRU starts from a zero state and
+def generate_sequences(model, transform, n_samples=100, seq_len=SEQ_LEN,
+                       burn_in=BURN_IN, sparse=True):
+    """Sample with the model's own noise; return original-unit features,
+    shape (N, T, 42), numpy. The generator's GRU starts from a zero state and
     the first ~10 steps are rough (spread roughness 1.3 vs 0.2 for real), so
     burn_in extra steps are generated and dropped."""
     model.eval()
@@ -79,7 +123,10 @@ def generate_sequences(
         b = min(256, n_samples - start)
         chunks.append(model.generate(b, seq_len + burn_in)[:, burn_in:].cpu())
     generated = torch.cat(chunks)  # standardised space
-    return transform.inverse_normalise(generated).numpy()
+    features = transform.inverse_normalise(generated).numpy()
+    if sparse and SPARSE_PARAMS is not None:
+        features = sparsify.apply(features, SPARSE_PARAMS, seed=SEED)
+    return features
 
 
 def real_start_mids(n_samples, rng):
@@ -107,9 +154,10 @@ def structure_report(features):
 
     spread = ask_gap[:, 0] + bid_gap[:, 0]
     tight = spread < 0.5  # rounds to < 1 tick
-    sub_tick = ((ask_gap[:, 1:] < 0.5) & ask_ne[:, 1:]).any(axis=1) | (
-        (bid_gap[:, 1:] < 0.5) & bid_ne[:, 1:]
-    ).any(axis=1)
+    sub_tick = (
+        ((ask_gap[:, 1:] < 0.5) & ask_ne[:, 1:]).any(axis=1)
+        | ((bid_gap[:, 1:] < 0.5) & bid_ne[:, 1:]).any(axis=1)
+    )
     neg_vol = (lv[..., 1] < 0).any(axis=1) | (lv[..., 3] < 0).any(axis=1)
     empty_l1 = ~ask_ne[:, 0] | ~bid_ne[:, 0]
 
@@ -200,9 +248,7 @@ def to_lobster_rows(dec, tick_size=TICK_SIZE):
     return raw.reshape(n, t, 40)
 
 
-def plot_generated_lob(
-    dec, sample_idx=0, timestep=0, path="figs/generated_lob.png"
-):
+def plot_generated_lob(dec, sample_idx=0, timestep=0, path="figs/generated_lob.png"):
     mid = dec["mid"][sample_idx, timestep]
     ask_off = dec["ask_price"][sample_idx, timestep] - mid
     bid_off = dec["bid_price"][sample_idx, timestep] - mid  # negative
@@ -210,20 +256,10 @@ def plot_generated_lob(
     bid_vol = dec["bid_vol"][sample_idx, timestep]
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.barh(
-        ask_off[ask_vol > 0],
-        ask_vol[ask_vol > 0],
-        height=0.3,
-        label="Ask",
-        alpha=0.7,
-    )
-    ax.barh(
-        bid_off[bid_vol > 0],
-        bid_vol[bid_vol > 0],
-        height=0.3,
-        label="Bid",
-        alpha=0.7,
-    )
+    ax.barh(ask_off[ask_vol > 0], ask_vol[ask_vol > 0], height=0.3,
+            label="Ask", alpha=0.7)
+    ax.barh(bid_off[bid_vol > 0], bid_vol[bid_vol > 0], height=0.3,
+            label="Bid", alpha=0.7)
     ax.axhline(0, linestyle="--", linewidth=1)
     ax.set_xlabel("Volume (shares)")
     ax.set_ylabel("Price offset from midprice (ticks)")
@@ -236,18 +272,25 @@ def plot_generated_lob(
     plt.close(fig)
 
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("checkpoint", nargs="?", default=CHECKPOINT)
+    parser.add_argument("--samples", type=int, default=N_SAMPLES)
+    args = parser.parse_args()
+    if args.samples < 1:
+        parser.error("--samples must be positive")
+    n_samples = args.samples
     Path("out").mkdir(exist_ok=True)
     rng = np.random.default_rng(SEED)
     torch.manual_seed(SEED)
 
-    model, transform = load_model()
+    model, transform = load_model(args.checkpoint)
 
-    features = generate_sequences(model, transform, N_SAMPLES, SEQ_LEN)
+    features = generate_sequences(model, transform, n_samples, SEQ_LEN)
     np.save("out/generated_features.npy", features)
     structure_report(features)
 
-    dec = decode_features(features, real_start_mids(N_SAMPLES, rng))
+    dec = decode_features(features, real_start_mids(n_samples, rng))
     raw = to_lobster_rows(dec)
     np.save("out/generated_raw_lob.npy", raw)
 
@@ -266,3 +309,7 @@ if __name__ == "__main__":
 
     plot_generated_lob(dec)
     print("Saved to out/ and figs/")
+
+
+if __name__ == "__main__":
+    main()
