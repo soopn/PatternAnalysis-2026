@@ -5,6 +5,21 @@ import torch.optim as optim
 import torch.nn as nn
 
 
+def initialise_recurrent(module):
+    """Reference-style initialisation, applied only to fresh networks."""
+    if isinstance(module, nn.GRU):
+        for name, parameter in module.named_parameters():
+            if "weight_ih" in name:
+                nn.init.xavier_uniform_(parameter)
+            elif "weight_hh" in name:
+                nn.init.orthogonal_(parameter)
+            elif "bias" in name:
+                nn.init.zeros_(parameter)
+    elif isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight)
+        nn.init.zeros_(module.bias)
+
+
 class Embedder(nn.Module):
     def __init__(
         self, input_dim, hidden_dim, num_layers=2, activation_fun=nn.Sigmoid()
@@ -113,8 +128,35 @@ class TimeGAN(nn.Module):
         ema_decay=0.999,
         within_weight=50.0,
         reconstruction_event_weight=1.0,
+        noise_mode="correlated",
+        adam_beta1=0.9,
+        moment_mode="per_timestep",
+        initialisation="default",
     ):
         super().__init__()
+        if noise_mode not in ("correlated", "independent"):
+            raise ValueError("Unknown noise_mode")
+        if moment_mode not in ("per_timestep", "pooled"):
+            raise ValueError("Unknown moment_mode")
+        if initialisation not in ("default", "xavier_orthogonal"):
+            raise ValueError("Unknown initialisation")
+        # Save constructor settings so inference uses the training noise law.
+        self.model_config = {
+            "input_dim": input_dim, "hidden_dim": hidden_dim,
+            "noise_dim": noise_dim, "num_layers": num_layers,
+            "seq_len": seq_len, "learning_rate": learning_rate,
+            "gamma": gamma, "noise_rho": noise_rho,
+            "diff_weight": diff_weight, "corr_weight": corr_weight,
+            "ac_weight": ac_weight, "adv_weight": adv_weight,
+            "d_threshold": d_threshold, "gen_steps": gen_steps,
+            "lat_ac_weight": lat_ac_weight, "ema_decay": ema_decay,
+            "within_weight": within_weight,
+            "reconstruction_event_weight": reconstruction_event_weight,
+            "noise_mode": noise_mode, "adam_beta1": adam_beta1,
+            "moment_mode": moment_mode, "initialisation": initialisation,
+        }
+        self.noise_mode = noise_mode
+        self.moment_mode = moment_mode
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -137,6 +179,8 @@ class TimeGAN(nn.Module):
         self.generator = Generator(noise_dim, hidden_dim, num_layers)
         self.supervisor = Supervisor(hidden_dim, num_layers=1)
         self.discriminator = Discriminator(hidden_dim, num_layers)
+        if initialisation == "xavier_orthogonal":
+            self.apply(initialise_recurrent)
 
         # ema for generation path of generator, supervisor, recoverer 
         self.ema_decay = ema_decay
@@ -160,32 +204,38 @@ class TimeGAN(nn.Module):
             list(self.embedder.parameters())
             + list(self.recoverer.parameters()),
             lr=learning_rate,
+            betas=(adam_beta1, 0.999),
         )
 
         self.optimizer_s = optim.Adam(
             self.supervisor.parameters(),
             lr=learning_rate,
+            betas=(adam_beta1, 0.999),
         )
 
         self.optimizer_g = optim.Adam(
             list(self.generator.parameters())
             + list(self.supervisor.parameters()),
             lr=learning_rate,
+            betas=(adam_beta1, 0.999),
         )
 
         self.optimizer_d = optim.Adam(
             self.discriminator.parameters(),
             lr=learning_rate,
+            betas=(adam_beta1, 0.999),
         )
 
     def sample_noise(self, batch_size, seq_len, device):
-        """Uniform[0, 1] noise with two components:
+        """Uniform[0, 1] noise, independent or with two correlated components:
         - per-step channels: AR(1) in Gaussian space mapped to uniform
           marginals, so neighbouring steps get similar noise (rho = noise_rho)
           instead of independent draws, which made the output flicker;
         - per-sequence channels: one draw held constant over the whole
           sequence, so each sample can have its own regime.
         """
+        if self.noise_mode == "independent":
+            return torch.rand(batch_size, seq_len, self.noise_dim, device=device)
         half = self.noise_dim // 2
         rho = self.noise_rho
         scale = (1.0 - rho * rho) ** 0.5
@@ -219,8 +269,16 @@ class TimeGAN(nn.Module):
         a = a - a.mean(dim=(0, 1), keepdim=True)
         b = b - b.mean(dim=(0, 1), keepdim=True)
         num = (a * b).mean(dim=(0, 1))
-        den = torch.sqrt((a * a).mean(dim=(0, 1)) * (b * b).mean(dim=(0, 1)))
-        return num / (den + eps)
+        den = torch.sqrt(((a * a).mean(dim=(0, 1)) + eps)
+                         * ((b * b).mean(dim=(0, 1)) + eps))
+        return num / den
+
+    def moment_loss(self, real, fake):
+        dims = (0, 1) if self.moment_mode == "pooled" else (0,)
+        std_real = torch.sqrt(real.var(dim=dims, unbiased=False) + 1e-6)
+        std_fake = torch.sqrt(fake.var(dim=dims, unbiased=False) + 1e-6)
+        return ((real.mean(dim=dims) - fake.mean(dim=dims)).abs().mean()
+                + (std_real - std_fake).abs().mean())
 
     @staticmethod
     def event_losses(real, fake, feature_std):
@@ -391,21 +449,10 @@ class TimeGAN(nn.Module):
             h[:, 1:, :],
         )
 
-        # Match feature means and standard deviations at every timestep
-        # (statistics over the batch axis only -> [T, D], as in the
-        # reference TimeGAN).
+        # Match moments pooled over batch/time or separately per timestep.
         x_hat = self.recoverer(h_hat)
 
-        mean_real = x.mean(dim=0)
-        mean_fake = x_hat.mean(dim=0)
-
-        std_real = torch.sqrt(x.var(dim=0, unbiased=False) + 1e-6)
-        std_fake = torch.sqrt(x_hat.var(dim=0, unbiased=False) + 1e-6)
-
-        loss_moments = (
-            torch.abs(mean_real - mean_fake).mean()
-            + torch.abs(std_real - std_fake).mean()
-        )
+        loss_moments = self.moment_loss(x, x_hat)
 
         # Match step-to-step roughness (mean |difference| per feature), in
         # feature space and in latent space so the supervisor is constrained

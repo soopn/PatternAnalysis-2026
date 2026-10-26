@@ -46,8 +46,13 @@ MIN_BEST_EPOCH = (
 )
 
 # Edit these settings before pasting this file into a Jupyter cell.
-CKPT_DIR = Path("checkpoints/reconstruction_events_v1")
+CKPT_DIR = Path("checkpoints/reference_ablation_v1")
 RECONSTRUCTION_EVENT_WEIGHT = 1.0  # 0.0 gives the MSE-only reconstruction baseline
+LEARNING_RATE = 1e-4
+ADAM_BETA1 = 0.5
+NOISE_MODE = "independent"  # all channels independent, at training and inference
+MOMENT_MODE = "pooled"  # alternative: "per_timestep"
+INITIALISATION = "xavier_orthogonal"  # alternative: "default"
 
 random.seed(RAND_SEED)
 np.random.seed(RAND_SEED)
@@ -177,6 +182,8 @@ def save_checkpoint(model, transform, path, **extra):
     torch.save(
         {
             "model_state_dict": model.state_dict(),
+            "model_config": {**model.model_config,
+                             "reconstruction_event_weight": model.reconstruction_event_weight},
             "feature_mean": transform.mean,
             "feature_std": transform.std,
             "validation_version": "events_v1_burn20",
@@ -282,6 +289,9 @@ if __name__ == "__main__":
         if globals()[name] < 1:
             raise ValueError(f"{name} must be positive")
     MIN_BEST_EPOCH = min(MIN_BEST_EPOCH, JOINT_EPOCHS)
+    print(f"Settings: lr={LEARNING_RATE} beta1={ADAM_BETA1} "
+          f"noise={NOISE_MODE} moments={MOMENT_MODE} init={INITIALISATION} "
+          f"reconstruction_events={RECONSTRUCTION_EVENT_WEIGHT} checkpoints={CKPT_DIR}")
     train_set = LOBSTERDataset(
         root="LOBSTER_DATA",
         seq_len=SEQ_LEN,
@@ -313,6 +323,11 @@ if __name__ == "__main__":
         num_layers=2,
         seq_len=SEQ_LEN,
         reconstruction_event_weight=RECONSTRUCTION_EVENT_WEIGHT,
+        learning_rate=LEARNING_RATE,
+        adam_beta1=ADAM_BETA1,
+        noise_mode=NOISE_MODE,
+        moment_mode=MOMENT_MODE,
+        initialisation=INITIALISATION,
     ).to(DEVICE)
 
     model.feature_mean.copy_(transform.mean.to(DEVICE))
