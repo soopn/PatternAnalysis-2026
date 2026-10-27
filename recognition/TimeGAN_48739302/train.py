@@ -46,7 +46,7 @@ MIN_BEST_EPOCH = (
 )
 
 # Edit these settings before pasting this file into a Jupyter cell.
-CKPT_DIR = Path("checkpoints/adversarial_balance_v1")
+CKPT_DIR = Path("checkpoints/supervisor_weight_B_v1")
 RECONSTRUCTION_EVENT_WEIGHT = 1.0  # 0.0 gives the MSE-only reconstruction baseline
 LEARNING_RATE = 1e-4
 ADAM_BETA1 = 0.5
@@ -54,6 +54,7 @@ NOISE_MODE = "independent"  # all channels independent, at training and inferenc
 MOMENT_MODE = "pooled"  # alternative: "per_timestep"
 INITIALISATION = "xavier_orthogonal"  # alternative: "default"
 GENERATOR_AUXILIARY_SCALE = 0.1  # 1.0 restores the previous generator objective
+SUPERVISOR_LOSS_WEIGHT = 100.0  # independent effective weight; A used 10.0
 DISCRIMINATOR_INPUT = "standardised"  # alternative: "raw"
 LOG_GRADIENTS = True  # sample the first joint batch of each epoch
 DISCRIMINATOR_EVAL_WINDOWS = 128
@@ -176,15 +177,22 @@ def run_validation(model, loader, transform, with_generation=False):
     model.eval()
 
     total, n = 0.0, 0
+    supervised_total, persistence_total, latent_count = 0.0, 0.0, 0
     event_totals = {}
     real = []
     for x in get_batches(loader, transform):
-        x_hat = model.reconstruct(x)
+        h = model.embedder(x)
+        x_hat = model.recoverer(h)
         total += F.mse_loss(x_hat, x).item() * x.size(0)
         for name, value in model.reconstruction_event_losses(x, x_hat, model.feature_std).items():
             event_totals[name] = event_totals.get(name, 0.0) + value.item() * x.size(0)
         n += x.size(0)
         if with_generation:
+            predicted = model.supervisor(h)[:, :-1]
+            target = h[:, 1:]
+            supervised_total += (predicted - target).square().sum().item()
+            persistence_total += (h[:, :-1] - target).square().sum().item()
+            latent_count += target.numel()
             real.append(x)
 
     gap = None
@@ -210,6 +218,14 @@ def run_validation(model, loader, transform, with_generation=False):
         ).item()
 
     model.last_validation_events = {name: value / max(n, 1) for name, value in event_totals.items()}
+    model.last_validation_supervisor = {}
+    if latent_count:
+        model.last_validation_supervisor = {
+            "mse": supervised_total / latent_count,
+            "persistence_mse": persistence_total / latent_count,
+        }
+        if persistence_total > 0:
+            model.last_validation_supervisor["ratio"] = supervised_total / persistence_total
     model.train()
     return total / max(n, 1), gap
 
@@ -220,13 +236,16 @@ def save_checkpoint(model, transform, path, **extra):
             "model_state_dict": model.state_dict(),
             "model_config": {**model.model_config,
                              "reconstruction_event_weight": model.reconstruction_event_weight,
-                             "generator_auxiliary_scale": model.generator_auxiliary_scale},
+                             "generator_auxiliary_scale": model.generator_auxiliary_scale,
+                             "supervisor_loss_weight": model.supervisor_loss_weight},
             "feature_mean": transform.mean,
             "feature_std": transform.std,
             "validation_version": "events_v1_burn20",
             "loss_weights": {"events": 25.0, "volatility": 25.0,
                              "reconstruction_events": model.reconstruction_event_weight,
                              "generator_auxiliary_scale": model.generator_auxiliary_scale},
+            "effective_supervisor_loss_weight": model.effective_supervisor_loss_weight,
+            "supervisor_validation": getattr(model, "last_validation_supervisor", {}),
             "reconstruction_version": "paired_volume_events_v1",
             "discriminator_validation": getattr(model, "last_validation_discriminator", {}),
             "sampled_generator_diagnostics": getattr(model, "last_generator_diagnostics", {}),
@@ -294,6 +313,7 @@ def main(model, train_loader, eval_loader, transform):
             f"val_reconstruction={val:.5f} moment_gap={gap:.5f}"
             + " " + " ".join(f"val_event_{k}={v:.5f}" for k, v in model.last_validation_events.items())
             + " " + " ".join(f"val_D_{k}={v:.4f}" for k, v in model.last_validation_discriminator.items())
+            + " " + " ".join(f"val_S_{k}={v:.5g}" for k, v in model.last_validation_supervisor.items())
         )
         if LOG_GRADIENTS:
             diagnostic = model.last_generator_diagnostics
@@ -346,6 +366,7 @@ if __name__ == "__main__":
     print(f"Settings: lr={LEARNING_RATE} beta1={ADAM_BETA1} "
           f"noise={NOISE_MODE} moments={MOMENT_MODE} init={INITIALISATION} "
           f"G_aux_scale={GENERATOR_AUXILIARY_SCALE} "
+          f"S_loss_weight={SUPERVISOR_LOSS_WEIGHT} "
           f"D_input={DISCRIMINATOR_INPUT} "
           f"reconstruction_events={RECONSTRUCTION_EVENT_WEIGHT} checkpoints={CKPT_DIR}")
     train_set = LOBSTERDataset(
@@ -385,6 +406,7 @@ if __name__ == "__main__":
         moment_mode=MOMENT_MODE,
         initialisation=INITIALISATION,
         generator_auxiliary_scale=GENERATOR_AUXILIARY_SCALE,
+        supervisor_loss_weight=SUPERVISOR_LOSS_WEIGHT,
         discriminator_input=DISCRIMINATOR_INPUT,
     ).to(DEVICE)
 

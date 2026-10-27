@@ -162,6 +162,7 @@ class TimeGAN(nn.Module):
         initialisation="default",
         generator_auxiliary_scale=1.0,
         discriminator_input="raw",
+        supervisor_loss_weight=None,
     ):
         super().__init__()
         if noise_mode not in ("correlated", "independent"):
@@ -172,6 +173,8 @@ class TimeGAN(nn.Module):
             raise ValueError("Unknown initialisation")
         if generator_auxiliary_scale < 0:
             raise ValueError("generator_auxiliary_scale must be nonnegative")
+        if supervisor_loss_weight is not None and supervisor_loss_weight < 0:
+            raise ValueError("supervisor_loss_weight must be nonnegative or None")
         # Save constructor settings so inference uses the training noise law.
         self.model_config = {
             "input_dim": input_dim, "hidden_dim": hidden_dim,
@@ -188,10 +191,14 @@ class TimeGAN(nn.Module):
             "moment_mode": moment_mode, "initialisation": initialisation,
             "generator_auxiliary_scale": generator_auxiliary_scale,
             "discriminator_input": discriminator_input,
+            "supervisor_loss_weight": supervisor_loss_weight,
         }
         self.noise_mode = noise_mode
         self.moment_mode = moment_mode
         self.generator_auxiliary_scale = generator_auxiliary_scale
+        # Effective coefficient, independent of the global auxiliary scale.
+        # None preserves the old 100 * auxiliary_scale behaviour for checkpoints.
+        self.supervisor_loss_weight = supervisor_loss_weight
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -546,8 +553,16 @@ class TimeGAN(nn.Module):
             "events": 25.0 * loss_events,
             "volatility": 25.0 * loss_volatility,
         }
-        return {name: value if name == "adversarial" else self.generator_auxiliary_scale * value
-                for name, value in terms.items()}
+        weighted = {name: value if name == "adversarial" else self.generator_auxiliary_scale * value
+                    for name, value in terms.items()}
+        if self.supervisor_loss_weight is not None:
+            weighted["supervised"] = self.supervisor_loss_weight * torch.sqrt(loss_supervised + 1e-8)
+        return weighted
+
+    @property
+    def effective_supervisor_loss_weight(self):
+        return (100.0 * self.generator_auxiliary_scale if self.supervisor_loss_weight is None
+                else self.supervisor_loss_weight)
 
     def generator_gradient_diagnostics(self, terms, detailed=False):
         """Measure actual weighted gradients without changing parameters/.grad."""
@@ -581,10 +596,16 @@ class TimeGAN(nn.Module):
             report["gradients"][name] = {
                 "adversarial_norm": an, "auxiliary_norm": xn,
                 "adversarial_to_auxiliary_ratio": an / xn if xn else None,
-                "cosine_adv_aux": (torch.dot(adv, aux).item() / (an * xn)) if an and xn else None,
+                "cosine_adv_aux": max(-1.0, min(1.0, torch.dot(adv, aux).item() / (an * xn))) if an and xn else None,
                 "total_norm": (adv + aux).norm().item(),
                 "component_norms": {key: value[indices].norm().item() for key, value in vectors.items()},
             }
+            if detailed:
+                report["gradients"][name]["component_cosine_to_adversarial"] = {
+                    key: max(-1.0, min(1.0, torch.dot(adv, value[indices]).item() / (an * value[indices].norm().item())))
+                    if an and value[indices].norm().item() else None
+                    for key, value in vectors.items()
+                }
         return report
 
     # generator + supervisor update
