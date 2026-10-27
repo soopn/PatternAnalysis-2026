@@ -91,8 +91,15 @@ class Supervisor(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, hidden_dim, num_layers=2):
+    def __init__(self, hidden_dim, num_layers=2, input_mode="raw"):
         super().__init__()
+        if input_mode not in ("raw", "standardised"):
+            raise ValueError("Unknown discriminator input mode")
+        self.input_mode = input_mode
+        if input_mode == "standardised":
+            self.register_buffer("input_center", torch.zeros(hidden_dim))
+            self.register_buffer("input_scale", torch.ones(hidden_dim))
+            self.register_buffer("input_ready", torch.zeros(1))
 
         self.rnn = nn.GRU(
             hidden_dim, hidden_dim, num_layers=num_layers, batch_first=True
@@ -100,9 +107,30 @@ class Discriminator(nn.Module):
         self.fc = nn.Linear(hidden_dim, 1)
 
     def forward(self, h):
+        if self.input_mode == "standardised" and self.input_ready.item():
+            h = (h - self.input_center) / self.input_scale
         d, _ = self.rnn(h)
         d = self.fc(d)
         return d
+
+    @torch.no_grad()
+    def fit_input_statistics(self, real_latents):
+        """Fit once on real training latents, preserving the current function.
+
+        Freeze these statistics thereafter; fake samples and validation never
+        update them. The first GRU input affine map absorbs the coordinate
+        change so switching on conditioning does not jump the predictions.
+        """
+        if self.input_mode == "raw" or self.input_ready.item():
+            return
+        center = real_latents.mean((0, 1))
+        scale = real_latents.std((0, 1), unbiased=False).clamp_min(1e-3)
+        original = self.rnn.weight_ih_l0.clone()
+        self.rnn.weight_ih_l0.mul_(scale[None, :])
+        self.rnn.bias_ih_l0.add_(original @ center)
+        self.input_center.copy_(center)
+        self.input_scale.copy_(scale)
+        self.input_ready.fill_(1)
 
 
 class TimeGAN(nn.Module):
@@ -132,6 +160,8 @@ class TimeGAN(nn.Module):
         adam_beta1=0.9,
         moment_mode="per_timestep",
         initialisation="default",
+        generator_auxiliary_scale=1.0,
+        discriminator_input="raw",
     ):
         super().__init__()
         if noise_mode not in ("correlated", "independent"):
@@ -140,6 +170,8 @@ class TimeGAN(nn.Module):
             raise ValueError("Unknown moment_mode")
         if initialisation not in ("default", "xavier_orthogonal"):
             raise ValueError("Unknown initialisation")
+        if generator_auxiliary_scale < 0:
+            raise ValueError("generator_auxiliary_scale must be nonnegative")
         # Save constructor settings so inference uses the training noise law.
         self.model_config = {
             "input_dim": input_dim, "hidden_dim": hidden_dim,
@@ -154,9 +186,12 @@ class TimeGAN(nn.Module):
             "reconstruction_event_weight": reconstruction_event_weight,
             "noise_mode": noise_mode, "adam_beta1": adam_beta1,
             "moment_mode": moment_mode, "initialisation": initialisation,
+            "generator_auxiliary_scale": generator_auxiliary_scale,
+            "discriminator_input": discriminator_input,
         }
         self.noise_mode = noise_mode
         self.moment_mode = moment_mode
+        self.generator_auxiliary_scale = generator_auxiliary_scale
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -178,7 +213,7 @@ class TimeGAN(nn.Module):
         self.recoverer = Recoverer(hidden_dim, input_dim, num_layers)
         self.generator = Generator(noise_dim, hidden_dim, num_layers)
         self.supervisor = Supervisor(hidden_dim, num_layers=1)
-        self.discriminator = Discriminator(hidden_dim, num_layers)
+        self.discriminator = Discriminator(hidden_dim, num_layers, input_mode=discriminator_input)
         if initialisation == "xavier_orthogonal":
             self.apply(initialise_recurrent)
 
@@ -418,19 +453,16 @@ class TimeGAN(nn.Module):
 
         return loss.detach().item()
 
-    # generator + supervisor update
-    def train_generator_step(self, x):
+    def generator_objectives(self, x, z=None):
+        """Weighted terms used by G/S, shared by training and gradient audits."""
         batch_size, seq_len, _ = x.shape
 
         with torch.no_grad():
             h = self.embedder(x)
 
-        z = self.sample_noise(batch_size, seq_len, x.device)
-
-        # Freeze discriminator weights, but retain gradients
-        # through it into the generated latent sequence
-        self.set_requires_grad(self.discriminator, False)
-        self.optimizer_g.zero_grad(set_to_none=True)
+        self.discriminator.fit_input_statistics(h)
+        if z is None:
+            z = self.sample_noise(batch_size, seq_len, x.device)
 
         e_hat = self.generator(z)
         h_hat = self.supervisor(e_hat)
@@ -502,25 +534,75 @@ class TimeGAN(nn.Module):
         # standard weighting
         loss_events = self.event_losses(x, x_hat, self.feature_std)
         loss_volatility = self.volatility_loss(x, x_hat, self.feature_mean, self.feature_std)
-        loss_g = (
-            self.adv_weight * (loss_adv + self.gamma * loss_adv_e)
-            + 100.0 * torch.sqrt(loss_supervised + 1e-8)
-            + 100.0 * loss_moments
-            + self.diff_weight * loss_diff
-            + self.corr_weight * loss_corr
-            + self.ac_weight * loss_ac
-            + self.lat_ac_weight * loss_ac_h
-            + self.within_weight * loss_within
-            + 25.0 * loss_events
-            + 25.0 * loss_volatility
-        )
+        terms = {
+            "adversarial": self.adv_weight * (loss_adv + self.gamma * loss_adv_e),
+            "supervised": 100.0 * torch.sqrt(loss_supervised + 1e-8),
+            "moments": 100.0 * loss_moments,
+            "difference": self.diff_weight * loss_diff,
+            "correlation": self.corr_weight * loss_corr,
+            "autocorrelation": self.ac_weight * loss_ac,
+            "latent_autocorrelation": self.lat_ac_weight * loss_ac_h,
+            "within": self.within_weight * loss_within,
+            "events": 25.0 * loss_events,
+            "volatility": 25.0 * loss_volatility,
+        }
+        return {name: value if name == "adversarial" else self.generator_auxiliary_scale * value
+                for name, value in terms.items()}
 
-        loss_g.backward()
-        self.optimizer_g.step()
+    def generator_gradient_diagnostics(self, terms, detailed=False):
+        """Measure actual weighted gradients without changing parameters/.grad."""
+        generator = list(self.generator.parameters())
+        supervisor = list(self.supervisor.parameters())
+        parameters = generator + supervisor
+        split = sum(p.numel() for p in generator)
 
-        self.set_requires_grad(self.discriminator, True)
+        def vector(loss):
+            gradients = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
+            result = torch.cat([
+                (g.detach() if g is not None else torch.zeros_like(p)).reshape(-1)
+                for p, g in zip(parameters, gradients)
+            ])
+            if not torch.isfinite(result).all():
+                raise RuntimeError("Nonfinite generator gradient in diagnostic")
+            return result
 
-        return loss_g.detach().item()
+        auxiliary = sum(value for name, value in terms.items() if name != "adversarial")
+        vectors = {"adversarial": vector(terms["adversarial"]), "auxiliary": vector(auxiliary)}
+        if detailed:
+            vectors.update({name: vector(value) for name, value in terms.items()
+                            if name != "adversarial"})
+        groups = {"generator": slice(0, split), "supervisor": slice(split, None),
+                  "combined": slice(None)}
+        report = {"weighted_losses": {name: value.detach().item() for name, value in terms.items()},
+                  "gradients": {}}
+        for name, indices in groups.items():
+            adv, aux = vectors["adversarial"][indices], vectors["auxiliary"][indices]
+            an, xn = adv.norm().item(), aux.norm().item()
+            report["gradients"][name] = {
+                "adversarial_norm": an, "auxiliary_norm": xn,
+                "adversarial_to_auxiliary_ratio": an / xn if xn else None,
+                "cosine_adv_aux": (torch.dot(adv, aux).item() / (an * xn)) if an and xn else None,
+                "total_norm": (adv + aux).norm().item(),
+                "component_norms": {key: value[indices].norm().item() for key, value in vectors.items()},
+            }
+        return report
+
+    # generator + supervisor update
+    def train_generator_step(self, x, profile_gradients=False):
+        flags = [p.requires_grad for p in self.discriminator.parameters()]
+        self.set_requires_grad(self.discriminator, False)
+        try:
+            self.optimizer_g.zero_grad(set_to_none=True)
+            terms = self.generator_objectives(x)
+            if profile_gradients:
+                self.last_generator_diagnostics = self.generator_gradient_diagnostics(terms)
+            loss_g = sum(terms.values())
+            loss_g.backward()
+            self.optimizer_g.step()
+            return loss_g.detach().item()
+        finally:
+            for parameter, flag in zip(self.discriminator.parameters(), flags):
+                parameter.requires_grad_(flag)
 
     # embedder + recovery update
     def train_embedder_step(self, x):
@@ -567,6 +649,7 @@ class TimeGAN(nn.Module):
             e_hat = self.generator(z)
             h_hat = self.supervisor(e_hat)
 
+        self.discriminator.fit_input_statistics(h)
         self.optimizer_d.zero_grad(set_to_none=True)
 
         y_real = self.discriminator(h.detach())
@@ -587,18 +670,19 @@ class TimeGAN(nn.Module):
 
         # Bound discriminator training: skip the update while D is already
         # winning clearly (sum of three BCE terms; chance level is ~2.08).
-        if loss_d.item() > self.d_threshold:
+        self.last_d_updated = loss_d.item() > self.d_threshold
+        if self.last_d_updated:
             loss_d.backward()
             self.optimizer_d.step()
 
         return loss_d.detach().item()
 
-    def train_joint_step(self, x):
+    def train_joint_step(self, x, profile_gradients=False):
         """Adversarial training step"""
 
         # update generator and embedder/recoverer twice per discriminator step
-        for _ in range(self.gen_steps):
-            g_loss = self.train_generator_step(x)
+        for step in range(self.gen_steps):
+            g_loss = self.train_generator_step(x, profile_gradients=profile_gradients and step == self.gen_steps - 1)
             er_loss = self.train_embedder_step(x)
         d_loss = self.train_discriminator_step(x)
         if self.ema_ready.item() > 0:

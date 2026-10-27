@@ -46,13 +46,17 @@ MIN_BEST_EPOCH = (
 )
 
 # Edit these settings before pasting this file into a Jupyter cell.
-CKPT_DIR = Path("checkpoints/reference_ablation_v1")
+CKPT_DIR = Path("checkpoints/adversarial_balance_v1")
 RECONSTRUCTION_EVENT_WEIGHT = 1.0  # 0.0 gives the MSE-only reconstruction baseline
 LEARNING_RATE = 1e-4
 ADAM_BETA1 = 0.5
 NOISE_MODE = "independent"  # all channels independent, at training and inference
 MOMENT_MODE = "pooled"  # alternative: "per_timestep"
 INITIALISATION = "xavier_orthogonal"  # alternative: "default"
+GENERATOR_AUXILIARY_SCALE = 0.1  # 1.0 restores the previous generator objective
+DISCRIMINATOR_INPUT = "standardised"  # alternative: "raw"
+LOG_GRADIENTS = True  # sample the first joint batch of each epoch
+DISCRIMINATOR_EVAL_WINDOWS = 128
 
 random.seed(RAND_SEED)
 np.random.seed(RAND_SEED)
@@ -135,6 +139,37 @@ def moment_gap(real, fake):
 
 
 @torch.no_grad()
+def discriminator_validation(model, real):
+    """Held-out window AUC and accuracy at the discriminator class prior."""
+    indices = torch.linspace(0, len(real) - 1, min(DISCRIMINATOR_EVAL_WINDOWS, len(real)),
+                             device=real.device).long()
+    x = real[indices]
+    h_real = model.embedder(x)
+    real_scores = model.discriminator(h_real).mean((1, 2))
+    devices = [DEVICE.index or 0] if DEVICE.type == "cuda" else []
+    result = {}
+    if model.discriminator.input_mode == "standardised" and model.discriminator.input_ready.item():
+        center, scale = model.discriminator.input_center, model.discriminator.input_scale
+        result["latent_mean_shift"] = ((h_real.mean((0, 1)) - center) / scale).abs().mean().item()
+        result["latent_std_ratio"] = (h_real.std((0, 1), unbiased=False) / scale).mean().item()
+    with torch.random.fork_rng(devices=devices):
+        for path, ema, burn in (("live", False, 0), ("ema", True, 20)):
+            torch.manual_seed(RAND_SEED)
+            generator, supervisor, _ = model.nets(ema)
+            z = model.sample_noise(len(x), x.shape[1] + burn, x.device)
+            h = supervisor(generator(z))[:, burn:]
+            fake_scores = model.discriminator(h).mean((1, 2))
+            comparisons = real_scores[:, None] - fake_scores[None, :]
+            result[f"auc_{path}"] = ((comparisons > 0).float()
+                                    + 0.5 * (comparisons == 0).float()).mean().item()
+            threshold = -np.log(1 + model.gamma)
+            result[f"accuracy_{path}"] = 0.5 * (
+                (real_scores > threshold).float().mean()
+                + (fake_scores <= threshold).float().mean()).item()
+    return result
+
+
+@torch.no_grad()
 def run_validation(model, loader, transform, with_generation=False):
     """Reconstruction MSE on real eval data and, optionally, how close the
     generated feature moments are to the real ones."""
@@ -155,6 +190,7 @@ def run_validation(model, loader, transform, with_generation=False):
     gap = None
     if with_generation and real:
         real = torch.cat(real)
+        model.last_validation_discriminator = discriminator_validation(model, real)
         devices = [DEVICE.index or 0] if DEVICE.type == "cuda" else []
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(RAND_SEED)
@@ -183,13 +219,17 @@ def save_checkpoint(model, transform, path, **extra):
         {
             "model_state_dict": model.state_dict(),
             "model_config": {**model.model_config,
-                             "reconstruction_event_weight": model.reconstruction_event_weight},
+                             "reconstruction_event_weight": model.reconstruction_event_weight,
+                             "generator_auxiliary_scale": model.generator_auxiliary_scale},
             "feature_mean": transform.mean,
             "feature_std": transform.std,
             "validation_version": "events_v1_burn20",
             "loss_weights": {"events": 25.0, "volatility": 25.0,
-                             "reconstruction_events": model.reconstruction_event_weight},
+                             "reconstruction_events": model.reconstruction_event_weight,
+                             "generator_auxiliary_scale": model.generator_auxiliary_scale},
             "reconstruction_version": "paired_volume_events_v1",
+            "discriminator_validation": getattr(model, "last_validation_discriminator", {}),
+            "sampled_generator_diagnostics": getattr(model, "last_generator_diagnostics", {}),
             **extra,
         },
         path,
@@ -229,14 +269,16 @@ def main(model, train_loader, eval_loader, transform):
         model.train()
         g_losses, er_losses, d_losses = [], [], []
         p_real, p_fake = [], []
+        d_updates = []
 
-        for x in get_batches(train_loader, transform):
-            losses = model.train_joint_step(x)
+        for batch_index, x in enumerate(get_batches(train_loader, transform)):
+            losses = model.train_joint_step(x, profile_gradients=LOG_GRADIENTS and batch_index == 0)
             g_losses.append(losses["generator"])
             er_losses.append(losses["embedder_recovery"])
             d_losses.append(losses["discriminator"])
             p_real.append(losses["d_real"])
             p_fake.append(losses["d_fake"])
+            d_updates.append(model.last_d_updated)
 
         val, gap = run_validation(
             model, eval_loader, transform, with_generation=True
@@ -246,11 +288,23 @@ def main(model, train_loader, eval_loader, transform):
             f"G={np.mean(g_losses):.5f} "
             f"E/R={np.mean(er_losses):.5f} "
             f"D={np.mean(d_losses):.5f} "
+            f"D_updates={np.mean(d_updates):.1%} "
             f"P(real|real)={np.mean(p_real):.2f} "
             f"P(real|fake)={np.mean(p_fake):.2f} "
             f"val_reconstruction={val:.5f} moment_gap={gap:.5f}"
             + " " + " ".join(f"val_event_{k}={v:.5f}" for k, v in model.last_validation_events.items())
+            + " " + " ".join(f"val_D_{k}={v:.4f}" for k, v in model.last_validation_discriminator.items())
         )
+        if LOG_GRADIENTS:
+            diagnostic = model.last_generator_diagnostics
+            def fmt(value):
+                return "n/a" if value is None else f"{value:.3g}"
+            print("[G sampled gradients] " + " ".join(
+                f"{name}:adv={fmt(values['adversarial_norm'])},aux={fmt(values['auxiliary_norm'])},"
+                f"ratio={fmt(values['adversarial_to_auxiliary_ratio'])},cos={fmt(values['cosine_adv_aux'])}"
+                for name, values in diagnostic["gradients"].items()))
+            print("[G sampled weighted losses] " + " ".join(
+                f"{name}={value:.4f}" for name, value in diagnostic["weighted_losses"].items()))
 
         # "best" = generated feature moments closest to real eval data.
         # Reconstruction MSE says nothing about generation quality.
@@ -291,6 +345,8 @@ if __name__ == "__main__":
     MIN_BEST_EPOCH = min(MIN_BEST_EPOCH, JOINT_EPOCHS)
     print(f"Settings: lr={LEARNING_RATE} beta1={ADAM_BETA1} "
           f"noise={NOISE_MODE} moments={MOMENT_MODE} init={INITIALISATION} "
+          f"G_aux_scale={GENERATOR_AUXILIARY_SCALE} "
+          f"D_input={DISCRIMINATOR_INPUT} "
           f"reconstruction_events={RECONSTRUCTION_EVENT_WEIGHT} checkpoints={CKPT_DIR}")
     train_set = LOBSTERDataset(
         root="LOBSTER_DATA",
@@ -328,6 +384,8 @@ if __name__ == "__main__":
         noise_mode=NOISE_MODE,
         moment_mode=MOMENT_MODE,
         initialisation=INITIALISATION,
+        generator_auxiliary_scale=GENERATOR_AUXILIARY_SCALE,
+        discriminator_input=DISCRIMINATOR_INPUT,
     ).to(DEVICE)
 
     model.feature_mean.copy_(transform.mean.to(DEVICE))
