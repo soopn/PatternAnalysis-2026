@@ -198,7 +198,7 @@ class TimeGAN(nn.Module):
         lat_ac_weight=50.0,
         ema_decay=0.999,
         within_weight=50.0,
-        reconstruction_event_weight=1.0,
+        reconstruction_event_weight=0.0,
         noise_mode="correlated",
         adam_beta1=0.9,
         moment_mode="per_timestep",
@@ -206,6 +206,8 @@ class TimeGAN(nn.Module):
         generator_auxiliary_scale=1.0,
         discriminator_input="raw",
         supervisor_loss_weight=None,
+        event_weight=0.0,
+        volatility_weight=0.0,
     ):
         super().__init__()
         if noise_mode not in ("correlated", "independent"):
@@ -218,6 +220,8 @@ class TimeGAN(nn.Module):
             raise ValueError("generator_auxiliary_scale must be nonnegative")
         if supervisor_loss_weight is not None and supervisor_loss_weight < 0:
             raise ValueError("supervisor_loss_weight must be nonnegative or None")
+        if min(reconstruction_event_weight, event_weight, volatility_weight) < 0:
+            raise ValueError("Event and volatility weights must be nonnegative")
         # Save constructor settings so inference uses the training noise law.
         self.model_config = {
             "input_dim": input_dim, "hidden_dim": hidden_dim,
@@ -235,6 +239,8 @@ class TimeGAN(nn.Module):
             "generator_auxiliary_scale": generator_auxiliary_scale,
             "discriminator_input": discriminator_input,
             "supervisor_loss_weight": supervisor_loss_weight,
+            "event_weight": event_weight,
+            "volatility_weight": volatility_weight,
         }
         self.noise_mode = noise_mode
         self.moment_mode = moment_mode
@@ -242,6 +248,8 @@ class TimeGAN(nn.Module):
         # Effective coefficient, independent of the global auxiliary scale.
         # None preserves the old 100 * auxiliary_scale behaviour for checkpoints.
         self.supervisor_loss_weight = supervisor_loss_weight
+        self.event_weight = event_weight
+        self.volatility_weight = volatility_weight
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -483,8 +491,10 @@ class TimeGAN(nn.Module):
         self.optimizer_er.zero_grad(set_to_none=True)
 
         x_tilde = self.reconstruct(x)
-        events = self.reconstruction_event_losses(x, x_tilde, self.feature_std)
-        loss = self.mse(x_tilde, x) + self.reconstruction_event_weight * sum(events.values())
+        loss = self.mse(x_tilde, x)
+        if self.reconstruction_event_weight:
+            events = self.reconstruction_event_losses(x, x_tilde, self.feature_std)
+            loss = loss + self.reconstruction_event_weight * sum(events.values())
 
         loss.backward()
         self.optimizer_er.step()
@@ -588,8 +598,10 @@ class TimeGAN(nn.Module):
         ).abs().mean()
 
         # standard weighting
-        loss_events = self.event_losses(x, x_hat, self.feature_std)
-        loss_volatility = self.volatility_loss(x, x_hat, self.feature_mean, self.feature_std)
+        loss_events = (self.event_losses(x, x_hat, self.feature_std)
+                       if self.event_weight else x_hat.new_zeros(()))
+        loss_volatility = (self.volatility_loss(x, x_hat, self.feature_mean, self.feature_std)
+                           if self.volatility_weight else x_hat.new_zeros(()))
         terms = {
             "adversarial": self.adv_weight * (loss_adv + self.gamma * loss_adv_e),
             "supervised": 100.0 * torch.sqrt(loss_supervised + 1e-8),
@@ -599,8 +611,8 @@ class TimeGAN(nn.Module):
             "autocorrelation": self.ac_weight * loss_ac,
             "latent_autocorrelation": self.lat_ac_weight * loss_ac_h,
             "within": self.within_weight * loss_within,
-            "events": 25.0 * loss_events,
-            "volatility": 25.0 * loss_volatility,
+            "events": self.event_weight * loss_events,
+            "volatility": self.volatility_weight * loss_volatility,
         }
         weighted = {name: value if name == "adversarial" else self.generator_auxiliary_scale * value
                     for name, value in terms.items()}
@@ -621,6 +633,9 @@ class TimeGAN(nn.Module):
         split = sum(p.numel() for p in generator)
 
         def vector(loss):
+            if not loss.requires_grad:
+                # Disabled objectives are constants and have no gradient graph.
+                return parameters[0].new_zeros(sum(p.numel() for p in parameters))
             gradients = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
             result = torch.cat([
                 (g.detach() if g is not None else torch.zeros_like(p)).reshape(-1)
@@ -696,10 +711,10 @@ class TimeGAN(nn.Module):
         loss_er = (
             10.0 * torch.sqrt(loss_reconstruction + 1e-8)
             + 0.1 * loss_supervised
-            + self.reconstruction_event_weight * sum(
-                self.reconstruction_event_losses(x, x_tilde, self.feature_std).values()
-            )
         )
+        if self.reconstruction_event_weight:
+            loss_er = loss_er + self.reconstruction_event_weight * sum(
+                self.reconstruction_event_losses(x, x_tilde, self.feature_std).values())
 
         loss_er.backward()
         self.optimizer_er.step()

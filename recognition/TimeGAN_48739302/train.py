@@ -13,10 +13,14 @@ Overlapping stride-one windows are sampled without replacement within an epoch;
 each epoch uses up to STEPS_PER_EPOCH batches rather than a full data pass.
 
 Training stages:
-    1. AUTOENCODER_EPOCHS: embedder/recoverer reconstruction and volume events.
+    1. AUTOENCODER_EPOCHS: embedder/recoverer reconstruction (optional volume events).
     2. SUPERVISOR_EPOCHS: next-step prediction on embedded real sequences.
     3. JOINT_EPOCHS: alternating generator/supervisor, embedder/recoverer, and
        discriminator updates, with EMA generation and validation diagnostics.
+
+The active preset restores the recovered run_10 hyperparameters and disables
+later-added event/volatility objectives. Numerical autocorrelation stabilisation,
+fixed-seed chunked validation, diagnostics, and resource profiling are retained.
 
 Configuration is explicit: learning rate, Adam beta1, noise law, initialisation,
 pooled/per-timestep moments, discriminator conditioning, auxiliary scale, and
@@ -30,9 +34,19 @@ Logs contain shared G/S and E/R training objectives, D loss, reconstruction and
 volume-event validation losses, supervisor error versus latent persistence,
 discriminator diagnostics, and optional sampled G/S gradients/loss components.
 Sampled components describe the first joint batch, not an epoch mean.
+
+Stage summaries report elapsed wall time and peak PyTorch allocated/reserved
+GPU memory. CUDA is synchronised at stage boundaries, with memory peaks reset
+before each stage. Reserved memory can include allocator cache from earlier
+stages or notebook work; use a fresh kernel for reproducible measurements.
+The total covers all training stages, validation, logging and model saves,
+excluding dataset loading, scaler fitting and model construction. Results and
+hardware settings are also written to CKPT_DIR / training_profile.json.
 """
 
+import json
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -69,15 +83,21 @@ MIN_BEST_EPOCH = (
 
 # Edit these settings before pasting this file into a Jupyter cell.
 CKPT_DIR = Path("checkpoints")  # local output directory; set before training
-RECONSTRUCTION_EVENT_WEIGHT = 1.0  # 0.0 gives the MSE-only reconstruction baseline
-LEARNING_RATE = 1e-4
-ADAM_BETA1 = 0.5
-NOISE_MODE = "independent"  # all channels independent, at training and inference
-MOMENT_MODE = "pooled"  # alternative: "per_timestep"
-INITIALISATION = "xavier_orthogonal"  # alternative: "default"
-GENERATOR_AUXILIARY_SCALE = 0.1  # 1.0 restores the previous generator objective
-SUPERVISOR_LOSS_WEIGHT = 100.0  # independent effective weight; A used 10.0
-DISCRIMINATOR_INPUT = "standardised"  # alternative: "raw"
+# Recovered run_10 training preset; later-added event objectives are disabled.
+RECONSTRUCTION_EVENT_WEIGHT = 0.0
+LEARNING_RATE = 1e-3
+ADAM_BETA1 = 0.9
+NOISE_MODE = "correlated"  # half AR(1), half fixed per sequence; rho=0.7
+MOMENT_MODE = "per_timestep"
+INITIALISATION = "default"
+GENERATOR_AUXILIARY_SCALE = 1.0
+SUPERVISOR_LOSS_WEIGHT = 100.0
+DISCRIMINATOR_INPUT = "raw"
+GENERATOR_EVENT_WEIGHT = 0.0
+GENERATOR_VOLATILITY_WEIGHT = 0.0
+VALIDATION_BURN_IN = 0
+VALIDATION_EVENT_WEIGHT = 0.0
+VALIDATION_VOLATILITY_WEIGHT = 0.0
 LOG_GRADIENTS = True  # sample the first joint batch of each epoch
 DISCRIMINATOR_EVAL_WINDOWS = 128
 
@@ -86,6 +106,34 @@ np.random.seed(RAND_SEED)
 torch.manual_seed(RAND_SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(RAND_SEED)
+
+
+def start_training_stage(device):
+    """Synchronise CUDA, reset allocator peaks, and start a wall-clock timer."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
+    return time.perf_counter()
+
+
+def finish_training_stage(name, started, device):
+    """Report one complete stage, including validation and output overhead."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    result = {
+        "elapsed_seconds": time.perf_counter() - started,
+        "peak_allocated_gib": None,
+        "peak_reserved_gib": None,
+    }
+    if device.type == "cuda":
+        result["peak_allocated_gib"] = torch.cuda.max_memory_allocated(device) / 2**30
+        result["peak_reserved_gib"] = torch.cuda.max_memory_reserved(device) / 2**30
+    memory = (f"peak_allocated={result['peak_allocated_gib']:.3f}GiB "
+              f"peak_reserved={result['peak_reserved_gib']:.3f}GiB"
+              if device.type == "cuda" else "VRAM=N/A (CPU)")
+    print(f"[Profile {name}] elapsed={result['elapsed_seconds']:.2f}s "
+          f"({result['elapsed_seconds'] / 60:.2f}min) {memory}")
+    return result
 
 
 def strided_subset(dataset, max_items):
@@ -226,18 +274,19 @@ def run_validation(model, loader, transform, with_generation=False):
             torch.manual_seed(RAND_SEED)
             fake = torch.cat(
                 [
-                    model.generate(min(256, len(real) - i), real.size(1) + 20)[
-                        :, 20:
+                    model.generate(min(256, len(real) - i), real.size(1) + VALIDATION_BURN_IN)[
+                        :, VALIDATION_BURN_IN:
                     ]
                     for i in range(0, len(real), 256)
                 ]
             )
 
         gap = moment_gap(real, fake)
-        gap += model.event_losses(real, fake, model.feature_std).item()
-        gap += model.volatility_loss(
-            real, fake, model.feature_mean, model.feature_std
-        ).item()
+        if VALIDATION_EVENT_WEIGHT:
+            gap += VALIDATION_EVENT_WEIGHT * model.event_losses(real, fake, model.feature_std).item()
+        if VALIDATION_VOLATILITY_WEIGHT:
+            gap += VALIDATION_VOLATILITY_WEIGHT * model.volatility_loss(
+                real, fake, model.feature_mean, model.feature_std).item()
 
     model.last_validation_events = {name: value / max(n, 1) for name, value in event_totals.items()}
     model.last_validation_supervisor = {}
@@ -267,13 +316,17 @@ def save_checkpoint(model, transform, path, **extra):
                              "supervisor_loss_weight": model.supervisor_loss_weight},
             "feature_mean": transform.mean,
             "feature_std": transform.std,
-            "validation_version": "events_v1_burn20",
-            "loss_weights": {"events": 25.0, "volatility": 25.0,
+            "validation_version": "run10_moments_v1",
+            "validation_config": {"burn_in": VALIDATION_BURN_IN,
+                                  "event_weight": VALIDATION_EVENT_WEIGHT,
+                                  "volatility_weight": VALIDATION_VOLATILITY_WEIGHT,
+                                  "seed": RAND_SEED, "generation_batch_size": 256},
+            "loss_weights": {"events": model.event_weight, "volatility": model.volatility_weight,
                              "reconstruction_events": model.reconstruction_event_weight,
                              "generator_auxiliary_scale": model.generator_auxiliary_scale},
             "effective_supervisor_loss_weight": model.effective_supervisor_loss_weight,
             "supervisor_validation": getattr(model, "last_validation_supervisor", {}),
-            "reconstruction_version": "paired_volume_events_v1",
+            "reconstruction_version": ("paired_volume_events_v1" if model.reconstruction_event_weight else "mse_only"),
             "discriminator_validation": getattr(model, "last_validation_discriminator", {}),
             "sampled_generator_diagnostics": getattr(model, "last_generator_diagnostics", {}),
             **extra,
@@ -288,9 +341,35 @@ def main(model, train_loader, eval_loader, transform):
     Loaders supply raw book/message windows; transform converts each batch to
     training-standardised features. Validation generation uses held-out windows.
     """
+    device = next(model.parameters()).device
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    run_started = time.perf_counter()
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "device": str(device),
+        "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        "gpu_total_gib": (torch.cuda.get_device_properties(device).total_memory / 2**30
+                          if device.type == "cuda" else None),
+        "pytorch_version": str(torch.__version__),
+        "cuda_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version() if device.type == "cuda" else None,
+        "parameter_dtype": str(next(model.parameters()).dtype),
+        "mixed_precision": False,
+        "batch_size": getattr(train_loader, "batch_size", BATCH_SIZE),
+        "sequence_length": model.seq_len,
+        "gradient_profiling": LOG_GRADIENTS,
+        "scope": "Training stages including validation, logging and model saves; excludes data/scaler/model setup",
+        "memory_scope": "PyTorch allocator on this process/device; excludes non-PyTorch CUDA allocations; reserved includes retained cache",
+        "stages": {},
+    }
+    print(f"[Profile hardware] device={device} GPU={profile['gpu_name']} "
+          f"dtype={profile['parameter_dtype']} batch_size={profile['batch_size']} "
+          f"sequence_length={profile['sequence_length']} "
+          f"PyTorch={profile['pytorch_version']} CUDA={profile['cuda_version']}")
 
     # embedder + recoverer autoencoder
+    stage_started = start_training_stage(device)
     for epoch in range(AUTOENCODER_EPOCHS):
         model.train()
         losses = [
@@ -304,7 +383,11 @@ def main(model, train_loader, eval_loader, transform):
             + " " + " ".join(f"val_event_{k}={v:.5f}" for k, v in model.last_validation_events.items())
         )
 
+    profile["stages"]["autoencoder_pretraining"] = finish_training_stage(
+        "Autoencoder pretraining", stage_started, device)
+
     # supervisor learns latent temporal dynamics
+    stage_started = start_training_stage(device)
     for epoch in range(SUPERVISOR_EPOCHS):
         model.train()
         losses = [
@@ -313,7 +396,11 @@ def main(model, train_loader, eval_loader, transform):
         ]
         print(f"[Supervisor] {epoch + 1:03d} train={np.mean(losses):.6f}")
 
+    profile["stages"]["supervisor_pretraining"] = finish_training_stage(
+        "Supervisor pretraining", stage_started, device)
+
     # joint adversarial training
+    stage_started = start_training_stage(device)
     model.init_ema()
     best_gap = float("inf")
     for epoch in range(JOINT_EPOCHS):
@@ -384,12 +471,31 @@ def main(model, train_loader, eval_loader, transform):
         CKPT_DIR / "timegan_last.pt",
         epoch=JOINT_EPOCHS,
     )
+    profile["stages"]["joint_training"] = finish_training_stage(
+        "Joint training", stage_started, device)
+    profile["pretraining_seconds"] = sum(
+        profile["stages"][name]["elapsed_seconds"]
+        for name in ("autoencoder_pretraining", "supervisor_pretraining"))
+    profile["total_elapsed_seconds"] = time.perf_counter() - run_started
+    for key in ("peak_allocated_gib", "peak_reserved_gib"):
+        profile[key] = (max(stage[key] for stage in profile["stages"].values())
+                        if device.type == "cuda" else None)
+    print(f"[Profile total] pretraining={profile['pretraining_seconds']:.2f}s "
+          f"joint={profile['stages']['joint_training']['elapsed_seconds']:.2f}s "
+          f"total={profile['total_elapsed_seconds']:.2f}s "
+          f"peak_allocated_gib={profile['peak_allocated_gib']} "
+          f"peak_reserved_gib={profile['peak_reserved_gib']}")
+    with (CKPT_DIR / "training_profile.json").open("w") as fh:
+        json.dump(profile, fh, indent=2)
     print(f"Done. Best moment_gap={best_gap:.5f}")
 
 
 if __name__ == "__main__":
-    if RECONSTRUCTION_EVENT_WEIGHT < 0:
-        raise ValueError("RECONSTRUCTION_EVENT_WEIGHT must be nonnegative")
+    for name in ("RECONSTRUCTION_EVENT_WEIGHT", "GENERATOR_EVENT_WEIGHT",
+                 "GENERATOR_VOLATILITY_WEIGHT", "VALIDATION_EVENT_WEIGHT",
+                 "VALIDATION_VOLATILITY_WEIGHT", "VALIDATION_BURN_IN"):
+        if globals()[name] < 0:
+            raise ValueError(f"{name} must be nonnegative")
     for name in ("AUTOENCODER_EPOCHS", "SUPERVISOR_EPOCHS", "JOINT_EPOCHS",
                  "STEPS_PER_EPOCH", "EVAL_WINDOWS"):
         if globals()[name] < 1:
@@ -440,6 +546,8 @@ if __name__ == "__main__":
         generator_auxiliary_scale=GENERATOR_AUXILIARY_SCALE,
         supervisor_loss_weight=SUPERVISOR_LOSS_WEIGHT,
         discriminator_input=DISCRIMINATOR_INPUT,
+        event_weight=GENERATOR_EVENT_WEIGHT,
+        volatility_weight=GENERATOR_VOLATILITY_WEIGHT,
     ).to(DEVICE)
 
     model.feature_mean.copy_(transform.mean.to(DEVICE))
