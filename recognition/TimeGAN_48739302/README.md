@@ -1,6 +1,6 @@
 # TimeGAN limit-order-book experiments
 
-TimeGAN generates 100-event limit-order-book sequences from LOBSTER AMZN data. This comparison covers run_01–run_08 and run_10. Run identifiers label experiments; they do not imply training order.
+TimeGAN generates 100-event limit-order-book sequences from LOBSTER AMZN data.
 
 ## Model overview
 
@@ -75,9 +75,9 @@ Targets: KL <= 0.1 for spreads and returns, and SSIM > 0.6. KL is measured as `K
 | run_06 | 0.3437 | 0.0595 | 0.0207 | 0.7645 | 0.6375 | 0.1019 | 0.1600 |
 | run_07 | 0.1923 | 0.0783 | 0.0157 | 0.7955 | 0.7343 | 0.0897 | 0.1422 |
 | run_08 | 0.4085 | 0.0952 | 0.0437 | 0.8123 | 0.5692 | 0.0999 | 0.1443 |
-| **run_10** | **0.0986** | **0.0524** | **0.0433** | **0.8178** | **0.6929** | 0.1134 | 0.1457 |
+| **run_09** | **0.0986** | **0.0524** | **0.0433** | **0.8178** | **0.6929** | 0.1134 | 0.1457 |
 
-run_10 meets all three KL targets and both mean-heatmap SSIM targets. run_06, run_07, and run_08 meet the return KL targets but miss the spread target. run_07 has the highest price-indexed mean SSIM among the runs shown.
+run_09 meets all three KL targets and both mean-heatmap SSIM targets. run_06, run_07, and run_08 meet the return KL targets but miss the spread target. run_07 has the highest price-indexed mean SSIM among the runs shown.
 
 Mean-heatmap SSIM compares average depth profiles across 500 windows. Pair SSIM compares individual, unpaired real and generated windows. These measure different properties: none of the runs shown achieves pair SSIM above 0.6. The mean-map results therefore do not establish realistic individual event dynamics.
 
@@ -111,25 +111,25 @@ Price-indexed mean SSIM reaches 0.7343. Return KL passes, while spread KL remain
 
 ![Real and generated order-book depth for run_07](figs/orderbooks/run_07.png)
 
-### run_10: strongest combined metric result
+### run_09: strongest combined metric result
 
 Spread KL is 0.0986, one-step return KL is 0.0524, and ten-step return KL is 0.0433. Mean SSIM is 0.8178 by level and 0.6929 by price. Individual-window similarity remains low despite these aggregate improvements.
 
-![Real and generated order-book depth for run_10](figs/orderbooks/run_10.png)
+![Real and generated order-book depth for run_09](figs/orderbooks/run_09.png)
 
-## run_10: generated period
+## run_09: generated period
 
-All figures and the animation below show generated window 0: 100 events, indexed 0–99, matching the run_10 order-book example and the generation horizon used for the reported metrics. Every event is displayed; these are generated-only views of the same window, not a longer extrapolated sequence. Event index is not clock time.
+All figures and the animation below show generated window 0: 100 events, indexed 0–99, matching the run_09 order-book example and the generation horizon used for the reported metrics. Every event is displayed; these are generated-only views of the same window, not a longer extrapolated sequence. Event index is not clock time.
 
-![run_10 generated midprice, spread and imbalance over 100 events](figs/orderbooks/run_10_test_period_overview.png)
+![run_09 generated midprice, spread and imbalance over 100 events](figs/orderbooks/run_09_test_period_overview.png)
 
-![run_10 generated bid depth over 100 events](figs/orderbooks/run_10_test_period_bid_depth.png)
+![run_09 generated bid depth over 100 events](figs/orderbooks/run_09_test_period_bid_depth.png)
 
-![run_10 generated ask depth over 100 events](figs/orderbooks/run_10_test_period_ask_depth.png)
+![run_09 generated ask depth over 100 events](figs/orderbooks/run_09_test_period_ask_depth.png)
 
 The animation displays all ten bid volumes (blue) and ten ask volumes (orange) at each of the 100 events. The volume axis stays fixed, and playback is 10 frames per second.
 
-![run_10 generated volumes across the 100-event evaluation window](figs/orderbooks/run_10_generated_volumes.gif)
+![run_09 generated volumes across the 100-event evaluation window](figs/orderbooks/run_09_generated_volumes.gif)
 
 ## Model and development notes
 
