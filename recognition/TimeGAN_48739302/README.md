@@ -1,6 +1,4 @@
-# TimeGAN limit-order-book experiments
-
-TimeGAN generates 100-event limit-order-book sequences from LOBSTER AMZN data.
+# TimeGAN Limit Orderbook Model for LOBSTER Data
 
 ## Requirements
 
@@ -417,7 +415,7 @@ peak_reserved_gib=1.720703125
 
 Yoon, J., Jarrett, D., and van der Schaar, M. (2019). Time-series Generative Adversarial Networks. *Advances in Neural Information Processing Systems*, 32 (NeurIPS 2019). [Paper](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf).
 
-# Artificial Intelligence Usage Disclosure
+## Artificial Intelligence Usage Disclosure
 
 AI (ChatGPT) was used in the following sections of this repo:
   - scaffolding model architecture, data loading, training and evaluation pipelines
