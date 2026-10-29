@@ -396,16 +396,17 @@ The script prints metric tables and quantiles, writes a local JSON summary, and 
 
 ## Feasibility Report
 
-Hardware: **one NVIDIA L40S GPU**, with [48 GB of device memory](https://docs.nvidia.com/nim/large-language-models/1.1.0/support-matrix.html). 
+Hardware: 1 NVIDIA A100-PCIE-40GB
+Runtime: PyTorch=2.140+cu130 | CUDAver=13.0 | dtype=torch.float32
 
 | Stage | Epochs | Approximate elapsed time |
 |---|---:|---:|
-| Autoencoder pretraining | 100 | ~10 minutes |
-| Supervisor pretraining | 100 | ~15 minutes |
-| Joint adversarial training | 200 | ~1 hour 30 minutes |
-| Total Training Time | 400 | ~1 hour 55 minutes |
+| Pretraining | 100 | ~225s |
+| Joint adversarial training | 200 | ~2841s |
+| Total Training Time | 400 | ~3060s |
 
-VRAM budget: roughly 2–4 GiB for the training process**, assuming FP32, batch size 128, 100-event sequences, 128 hidden channels, the configured validation workload, and gradient diagnostics. 
+peak_allocated_gib=0.8120121955871582 
+peak_reserved_gib=1.720703125
 
 - Intended User Scope -> backtesters
 - Prototype Purpose -> creating useful data for quantitative analysis or backtesting algorithm
