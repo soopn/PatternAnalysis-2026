@@ -422,3 +422,4 @@ AI (ChatGPT) was used in the following sections of this repo:
   - scaffolding model architecture, data loading, training and evaluation pipelines
   - writing documentation
   - writing visualisation and temporary scripts for performance analysis
+  - writing tests scripts to validate regression results
