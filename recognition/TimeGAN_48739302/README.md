@@ -2,9 +2,68 @@
 
 TimeGAN generates 100-event limit-order-book sequences from LOBSTER AMZN data. This comparison covers run_01–run_08 and run_10. Run identifiers label experiments; they do not imply training order.
 
+## Model overview
+
+The model adapts TimeGAN, introduced by Yoon, Jarrett, and van der Schaar in [*Time-series Generative Adversarial Networks* (NeurIPS 2019)](https://papers.neurips.cc/paper_files/paper/2019/hash/c9efe5f26cd17ba6216bbe2a7d26d490-Abstract.html), a recurrent generative adversarial framework for sequences. It learns both a representation of real order books and the temporal relationships between events. A generator then creates synthetic sequences in that learned representation, and a recoverer converts them back into order-book features. Generation starts from random noise; it does not require a real order-book window as input.
+
+### Input features
+
+Each input is a window of 100 consecutive events, with 42 features per event:
+
+| Features | Representation | Purpose |
+|---|---|---|
+| Ask and bid prices at ten levels | 20 gaps measured in ticks | Describe book geometry relative to the midprice rather than absolute price. The first gap on each side is its distance from the midprice; deeper gaps are increments between levels. |
+| Ask and bid volumes at ten levels | 20 `log(1 + volume)` values | Reduce the scale difference between small and large displayed sizes. |
+| Midprice change | `asinh(change in ticks)` | Preserve the direction of price movement while reducing the influence of large moves. The first change in a window is zero. |
+| Inter-event time | `log(1 + time in microseconds)` | Represent the wide range of delays between events. |
+
+Each feature channel is standardised using a mean and standard deviation fitted on training data only. These same statistics are used for validation and generation. Empty levels and invalid price sentinels are handled during feature construction.
+
+### Architecture
+
+The implemented architecture uses 128 latent channels and 64 noise channels at each event. The recurrent layers are gated recurrent units (GRUs), which carry information from earlier events forward through the window.
+
+| Component | Network | Role |
+|---|---|---|
+| Embedder | Two-layer GRU → linear layer → sigmoid | Maps 42 observed features into 128 learned latent channels per event. |
+| Recoverer | Two-layer GRU → linear layer | Maps latent sequences back to 42 standardised features, with an unconstrained output. |
+| Generator | Two-layer GRU → linear layer → sigmoid | Maps 64-channel random-noise sequences into synthetic latent sequences. |
+| Supervisor | One-layer GRU → linear layer → sigmoid | Learns next-event latent dynamics and transforms the generator's latent output before recovery. |
+| Discriminator | Two-layer GRU → linear layer | Produces real/fake logits at each event in latent space, providing the adversarial training signal. |
+
+```mermaid
+flowchart LR
+    X[Real standardised features] --> E[Embedder]
+    E --> H[Real latent sequence]
+    H --> R[Recoverer]
+    R --> XR[Reconstructed features]
+    Z[Random noise] --> G[Generator]
+    G --> S[Supervisor]
+    S --> HS[Synthetic latent sequence]
+    HS --> R
+    H --> D[Discriminator]
+    HS --> D
+```
+
+### How embedding and recovery work
+
+For a batch of windows, the embedder changes the tensor shape from batch × 100 × 42 to batch × 100 × 128. Each latent vector reflects the current features and preceding events processed by the GRU. These channels are learned jointly rather than assigned to individual prices or volumes. This is a change of representation, not dimensional compression: the latent width is larger than the input width.
+
+The recoverer processes that latent sequence and produces batch × 100 × 42 reconstructed features. Reconstruction training encourages embedding and recovery to retain the information needed to reproduce the original book. The supervisor is trained to predict the next real latent state from the sequence up to the current event, encouraging temporal structure beyond reconstruction alone.
+
+During generation, noise passes through the generator, supervisor, and the same recoverer. The resulting features are first unstandardised, then converted to physical quantities: volume and time transforms are inverted, price changes are accumulated from an initial midprice, and price gaps are assembled into ask and bid levels. Sizes are rounded to integer shares and prices to the tick grid. The decoder enforces a spread of at least one tick and ordered deeper prices; these constraints come from decoding rules rather than proving the network learned them unaided.
+
+### Training stages
+
+1. Reconstruction pretraining: train the embedder and recoverer to reproduce real features.
+2. Supervisor pretraining: train next-event prediction on real latent sequences.
+3. Joint training: alternate generator/supervisor, embedder/recoverer, and discriminator updates. Adversarial and statistical objectives encourage synthetic sequences to match real distributions and temporal behaviour. The current implementation also includes volume-event reconstruction terms.
+
+The embedder and discriminator are used during training; synthetic features are produced by the generator → supervisor → recoverer path. Training settings vary across experiments, so the results below compare runs rather than isolate a single architectural change.
+
 ## Results
 
-Targets: **KL <= 0.1** for spreads and returns, and **SSIM > 0.6**. KL is measured as `KL(real || generated)` using shared histograms.
+Targets: KL <= 0.1 for spreads and returns, and SSIM > 0.6. KL is measured as `KL(real || generated)` using shared histograms.
 
 | Run | KL spread | KL 1-step return | KL 10-step return | Mean SSIM levels | Mean SSIM prices | Pair SSIM levels | Pair SSIM prices |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -18,15 +77,15 @@ Targets: **KL <= 0.1** for spreads and returns, and **SSIM > 0.6**. KL is measur
 | run_08 | 0.4085 | 0.0952 | 0.0437 | 0.8123 | 0.5692 | 0.0999 | 0.1443 |
 | run_10 | 0.0986 | 0.0524 | 0.0433 | 0.8178 | 0.6929 | 0.1134 | 0.1457 |
 
-**run_10 meets all three KL targets and both mean-heatmap SSIM targets.** run_06, run_07, and run_08 meet the return KL targets but miss the spread target. run_07 has the highest price-indexed mean SSIM among the runs shown.
+run_10 meets all three KL targets and both mean-heatmap SSIM targets. run_06, run_07, and run_08 meet the return KL targets but miss the spread target. run_07 has the highest price-indexed mean SSIM among the runs shown.
 
-Mean-heatmap SSIM compares average depth profiles across 500 windows. Pair SSIM compares individual, unpaired real and generated windows. These measure different properties: **none of the runs shown achieves pair SSIM above 0.6**. The mean-map results therefore do not establish realistic individual event dynamics.
+Mean-heatmap SSIM compares average depth profiles across 500 windows. Pair SSIM compares individual, unpaired real and generated windows. These measure different properties: none of the runs shown achieves pair SSIM above 0.6. The mean-map results therefore do not establish realistic individual event dynamics.
 
 `—` means unavailable. run_01 uses an earlier 40-feature representation and cannot be evaluated with the current 42-feature decoder. run_04 produces no usable ten-step return samples, so that entry is undefined rather than a pass.
 
 ## Order-book examples
 
-The following figures use **generated window 0** and **real test window 0** for every run. These are unpaired examples, chosen by index rather than visual quality. Each figure shows depth by level and depth by price relative to the contemporaneous midprice. Every figure uses the same real-data colour range and the same ±15-tick price band. Volumes outside the colour range saturate; prices outside the band are not displayed. Empty cells denote no displayed volume.
+The following figures use generated window 0 and real test window 0 for every run. These are unpaired examples, chosen by index rather than visual quality. Each figure shows depth by level and depth by price relative to the contemporaneous midprice. Every figure uses the same real-data colour range and the same ±15-tick price band. Volumes outside the colour range saturate; prices outside the band are not displayed. Empty cells denote no displayed volume.
 
 ### run_02: large return-distribution mismatch
 
@@ -60,7 +119,7 @@ Spread KL is 0.0986, one-step return KL is 0.0524, and ten-step return KL is 0.0
 
 ## run_10: generated period
 
-All figures and the animation below show **generated window 0: 100 events, indexed 0–99**, matching the run_10 order-book example and the generation horizon used for the reported metrics. Every event is displayed; these are generated-only views of the same window, not a longer extrapolated sequence. Event index is not clock time.
+All figures and the animation below show generated window 0: 100 events, indexed 0–99, matching the run_10 order-book example and the generation horizon used for the reported metrics. Every event is displayed; these are generated-only views of the same window, not a longer extrapolated sequence. Event index is not clock time.
 
 ![run_10 generated midprice, spread and imbalance over 100 events](figs/orderbooks/run_10_test_period_overview.png)
 
@@ -73,8 +132,6 @@ The animation displays all ten bid volumes (blue) and ten ask volumes (orange) a
 ![run_10 generated volumes across the 100-event evaluation window](figs/orderbooks/run_10_generated_volumes.gif)
 
 ## Model and development notes
-
-The model combines an embedder, recoverer, generator, supervisor, and discriminator. Autoencoder pretraining learns the feature representation; supervisor pretraining learns next-step latent dynamics; joint adversarial training learns generation and reconstruction together.
 
 The representation expanded from 40 features in run_01 to 42 in the evaluated runs: ten levels of ask/bid price gaps and log volumes, plus asinh midprice change and log inter-event time. This supports explicit spread, return, and event-time analysis. Detailed training settings were not retained for these early experiments, so the score changes cannot reliably be attributed to individual loss weights or optimisation changes.
 
@@ -91,3 +148,7 @@ The representation expanded from 40 features in run_01 to 42 in the evaluated ru
 - [modules.py](modules.py): recurrent networks, training objectives, and generation.
 - [train.py](train.py): training stages, and validation.
 - [predict.py](predict.py): model loading, feature decoding, and generated output formats.
+
+## References
+
+Yoon, J., Jarrett, D., and van der Schaar, M. (2019). Time-series Generative Adversarial Networks. *Advances in Neural Information Processing Systems*, 32 (NeurIPS 2019). [Paper](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf).
