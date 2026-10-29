@@ -1,0 +1,10 @@
+# Runtime dependencies for data loading, training, prediction and evaluation.
+# For a cluster, install the appropriate CPU/CUDA PyTorch build first:
+# https://pytorch.org/get-started/locally/
+# Versions are unpinned to allow platform-specific PyTorch installations.
+torch
+numpy
+pandas
+matplotlib
+scikit-image
+Pillow
