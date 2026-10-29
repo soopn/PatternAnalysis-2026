@@ -256,8 +256,7 @@ Mean-heatmap SSIM compares average depth profiles across 500 windows. Pair SSIM 
 
 ### Crossed and locked books
 
-A crossed book has best bid greater than best ask, while a locked book has equal best quotes. Among decoded rows with occupied, valid best quotes, both rates are 0.00% for generated and real data. Valid best quotes occur in **99.796%** of generated rows and **100%** of real rows.
-The absence of crossing is partly guaranteed by decoding: it enforces a spread of at least one tick, tick-aligned prices, and ordered deeper prices.
+A crossed book has best bid greater than best ask, while a locked book has equal best quotes. Among decoded rows with occupied, valid best quotes, both rates are 0.00% for generated and real data. Valid best quotes occur in **99.796%** of generated rows and **100%** of real rows. The absence of crossing is partly guaranteed by decoding as it enforces a spread of at least one tick, tick-aligned prices, and ordered deeper prices.
 
 ### Volatility clustering
 
@@ -288,6 +287,8 @@ There is evidence of **attenuated within-window variation and overly similar pat
 | Mean spread-path correlation between randomly sampled distinct windows | 0.011 | 0.337 |
 
 Generated books move too frequently while producing much smaller volume variation within each window. This combination is consistent with dense small fluctuations rather than realistic sparse book updates. The elevated correlation between generated spread paths suggests reduced temporal diversity. These observations support an under-dispersion/common-shape concern, but do not by themselves prove complete mode collapse or that noise is ignored.
+
+Overall this does not yet yield backtestable results for algorithmic training, due to incorrect market dynamcis, but it is successful in generating simple datasets that could be used for practice algorithms and market making due to the uncrossed books. 
 
 ## Next Steps 
 - Configure model to train on all tickers, not just AMZN.
