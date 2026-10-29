@@ -31,19 +31,13 @@ The implemented architecture uses 128 latent channels and 64 noise channels at e
 | Supervisor | One-layer GRU → linear layer → sigmoid | Learns next-event latent dynamics and transforms the generator's latent output before recovery. |
 | Discriminator | Two-layer GRU → linear layer | Produces real/fake logits at each event in latent space, providing the adversarial training signal. |
 
-```mermaid
-flowchart LR
-    X[Real standardised features] --> E[Embedder]
-    E --> H[Real latent sequence]
-    H --> R[Recoverer]
-    R --> XR[Reconstructed features]
-    Z[Random noise] --> G[Generator]
-    G --> S[Supervisor]
-    S --> HS[Synthetic latent sequence]
-    HS --> R
-    H --> D[Discriminator]
-    HS --> D
-```
+![TimeGAN block diagram and training scheme from Figure 1 of the original paper](figs/ref/block_training_diagram.png)
+
+*Block diagram and training scheme, Figure 1 of [Yoon et al. (2019)](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf). Solid arrows show data propagation; dashed arrows in the training scheme show gradient paths. Reconstruction, supervised, and adversarial objectives train complementary parts of the model.*
+
+![Recurrent TimeGAN data flow from Figure 2a of the original paper](figs/ref/dataflow.png)
+
+*Recurrent data flow, Figure 2(a) of the same paper. The static-feature branches labelled $s$ and $h_S$ are omitted in this order-book implementation, which models temporal features only. The paper's illustrated recoverer is feedforward and its discriminator bidirectional; this implementation uses a recurrent recoverer and a unidirectional discriminator. Its separate supervisor provides the next-step latent prediction described below.*
 
 ### How embedding and recovery work
 
@@ -52,6 +46,85 @@ For a batch of windows, the embedder changes the tensor shape from batch × 100 
 The recoverer processes that latent sequence and produces batch × 100 × 42 reconstructed features. Reconstruction training encourages embedding and recovery to retain the information needed to reproduce the original book. The supervisor is trained to predict the next real latent state from the sequence up to the current event, encouraging temporal structure beyond reconstruction alone.
 
 During generation, noise passes through the generator, supervisor, and the same recoverer. The resulting features are first unstandardised, then converted to physical quantities: volume and time transforms are inverted, price changes are accumulated from an initial midprice, and price gaps are assembled into ask and bid levels. Sizes are rounded to integer shares and prices to the tick grid. The decoder enforces a spread of at least one tick and ordered deeper prices; these constraints come from decoding rules rather than proving the network learned them unaided.
+
+### Equations and training objectives
+
+The notation follows [Section 4 of the TimeGAN paper](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf), specialised to temporal order-book features. The equations below distinguish the paper's framework from the actual losses in [modules.py](modules.py). Let $X=(x_1,\ldots,x_T)$ be a standardised window, with $x_t\in\mathbb{R}^{42}$ and $T=100$. Let $H=(h_1,\ldots,h_T)$ contain 128-channel latent vectors, and $Z$ contain 64-channel noise vectors. Expectations are estimated using training batches.
+
+**Embedding and recovery.** Corresponding to the mappings in paper Eqs. (3)–(4):
+
+$$
+H=E_{\theta_E}(X),\qquad \widetilde X=R_{\theta_R}(H).
+$$
+
+$E$ learns a causal representation of the observed sequence; $R$ reconstructs its features. Both are GRU networks here, so an output at event $t$ may use preceding events. Following the reconstruction objective in paper Eq. (7), the implementation uses mean squared error over batch, event and feature dimensions:
+
+$$
+\mathcal L_R=\operatorname{MSE}(X,\widetilde X).
+$$
+
+A low $\mathcal L_R$ means real sequences survive the embedding/recovery path; it does not establish that noise-generated sequences are realistic.
+
+**Generation and supervision.** This implementation splits latent generation into a noise-driven generator $G$ and a supervisor $F$:
+
+$$
+\widehat E=G_{\theta_G}(Z),\qquad
+\widehat H=F_{\theta_F}(\widehat E),\qquad
+\widehat X=R_{\theta_R}(\widehat H).
+$$
+
+$\widehat E$ denotes the generator's intermediate latent output, not the embedder. The supervised objective follows the next-step latent-matching idea of paper Eq. (9), with the explicit alignment used in code:
+
+$$
+\mathcal L_S=\operatorname{MSE}\!\left(F(H)_{1:T-1},H_{2:T}\right).
+$$
+
+The supervisor learns from real latent histories rather than only a discriminator's judgement. Its output at event $t$ targets the real latent vector at $t+1$; during generation it transforms the synthetic latent sequence.
+
+**Adversarial learning.** Write $D(H)=\operatorname{sigmoid}(d_{\theta_D}(H))$ for real probabilities. The temporal-only form of the paper's adversarial value function (Eq. (8)) is:
+
+$$
+V(D,G)=\mathbb E_X\!\left[\sum_t\log D(H)_t\right]
++\mathbb E_Z\!\left[\sum_t\log\!\left(1-D(\widehat H)_t\right)\right].
+$$
+
+The discriminator maximises this value while generation tries to fool it. Paper Eqs. (10)–(11) additionally combine reconstruction with $\lambda\mathcal L_S$ for embedding/recovery, and adversarial learning with $\eta\mathcal L_S$ for generation. Those are the framework's objectives, not the exact weighted expressions implemented here.
+
+In code, $\operatorname{BCE}$ averages binary cross-entropy over batch and events. It is evaluated directly on logits using `BCEWithLogitsLoss` for numerical stability. The discriminator also sees the generator output before supervision:
+
+$$
+\mathcal L_D=
+\operatorname{BCE}(D(H),1)
++\operatorname{BCE}(D(\widehat H),0)
++\gamma\operatorname{BCE}(D(\widehat E),0),
+$$
+
+$$
+\mathcal L_A=
+\operatorname{BCE}(D(\widehat H),1)
++\gamma\operatorname{BCE}(D(\widehat E),1),\qquad \gamma=1.
+$$
+
+The generator uses the non-saturating real-target loss $\mathcal L_A$, rather than directly minimising the logarithmic fake term in $V$. Real latent targets are detached during G/S updates; during discriminator updates both real and synthetic latent inputs are detached.
+
+**Implemented joint objectives.** With the restored training preset and $\epsilon=10^{-8}$:
+
+$$
+\mathcal L_{E/R}=10\sqrt{\mathcal L_R+\epsilon}+0.1\mathcal L_S,
+$$
+
+$$
+\begin{aligned}
+\mathcal L_{G/F}={}&10\mathcal L_A+100\sqrt{\mathcal L_S+\epsilon}
++100\mathcal L_M+100\mathcal L_{\mathrm{diff}}\\
+&+50\mathcal L_{\mathrm{corr}}+50\mathcal L_{\mathrm{ac}}
++50\mathcal L_{\mathrm{ac},H}+50\mathcal L_{\mathrm{within}}.
+\end{aligned}
+$$
+
+$\mathcal L_M$ matches feature means and standard deviations across the batch at each event position. $\mathcal L_{\mathrm{diff}}$ matches average absolute event-to-event changes in feature and latent space. $\mathcal L_{\mathrm{corr}}$ matches feature correlation matrices; $\mathcal L_{\mathrm{ac}}$ and $\mathcal L_{\mathrm{ac},H}$ match autocorrelations at lags 1 and 2. $\mathcal L_{\mathrm{within}}$ matches within-window variability and correlations after centring each window. These extra statistical penalties are implementation choices, not additional equations claimed by the paper. Event and volatility additions are disabled in this preset.
+
+Optimisation alternates between these objectives: E/R updates hold the supervisor fixed; G/F updates hold the discriminator fixed; D updates train only the discriminator. Pretraining instead uses $\mathcal L_R$ directly for E/R and $\mathcal L_S$ directly for the supervisor. Thus the square-root weighting belongs to joint training, not pretraining.
 
 ### Training stages
 
@@ -190,12 +263,39 @@ The representation expanded from 40 features in run_01 to 42 in the evaluated ru
 - Spread KL uses real-data quantile bins; one-step return KL uses half-tick bins; ten-step return KL uses real-data quantile bins. All runs use the same real test reference.
 - The figures illustrate single windows; the scores summarise the full evaluation set. Neither the figures nor passing histogram scores establish that event sparsity and temporal dependence are correct.
 
+## Evaluation script
+
+[evaluate.py](evaluate.py) evaluates a locally supplied trained model against real LOBSTER data. It generates fresh samples itself, so a separate prediction command is not required. Run it from the project directory, with the data available and dependencies including PyTorch, NumPy, pandas, Matplotlib, and scikit-image installed.
+
+```bash
+# Set MODEL_FILE to your local trained model before running.
+MPLBACKEND=Agg python evaluate.py "$MODEL_FILE"
+```
+
+The model argument is optional; omitting it uses the generic local default in [predict.py](predict.py). The script loads the model's feature scaler and configuration, generates 500 windows of 100 events with seed 123 and a 20-event warm-up, and decodes them into order books. Each window starts at the initial midprice of its corresponding real test window. Real test windows are selected evenly across 14:30–16:00.
+
+| Report | Interpretation |
+|---|---|
+| Spread KL | Distribution mismatch in bid–ask spread, measured in ticks. |
+| One-step and ten-step return KL | Distribution mismatch in midprice changes over one and ten events, measured in ticks. |
+| Inter-event-time KL | Distribution mismatch in transformed delays between events. |
+| Real-vs-real KL reference | The same metric between interleaved halves of the real windows; indicates finite-sample variation. |
+| Level-indexed SSIM | Similarity of log-volume depth heatmaps indexed by book level. |
+| Price-indexed SSIM | Similarity of log-volume heatmaps in a ±15-tick band around the contemporaneous midprice. |
+| Absolute-return autocorrelation | Real/generated volatility dependence at event lags 1–10. |
+| Period comparisons | Generated-vs-train/validation/test KL and real period shifts, helping distinguish generation error from time-of-day changes. |
+
+SSIM includes the mean of 300 randomly paired real/generated window scores, a real-vs-real reference, and the score between mean heatmaps. Pair scores and mean-map scores must be interpreted separately. Lower KL is better (target <= 0.1); higher SSIM is better (target > 0.6). These are aggregate diagnostics, not proof of realistic event-by-event dynamics.
+
+The script prints metric tables and quantiles, writes a local JSON summary, and saves depth-heatmap and absolute-return-autocorrelation figures. Existing evaluation outputs are overwritten, so retain results separately when comparing runs. Evaluation does not update model parameters.
+
 ## Source files
 
 - [dataset.py](dataset.py): LOBSTER loading, feature layout, and training-fitted standardisation.
 - [modules.py](modules.py): recurrent networks, training objectives, and generation.
 - [train.py](train.py): training stages, and validation.
 - [predict.py](predict.py): model loading, feature decoding, and generated output formats.
+- [evaluate.py](evaluate.py): distribution metrics, depth similarity, and temporal diagnostics.
 
 ## References
 
