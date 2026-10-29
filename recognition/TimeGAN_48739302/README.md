@@ -75,7 +75,7 @@ Targets: KL <= 0.1 for spreads and returns, and SSIM > 0.6. KL is measured as `K
 | run_06 | 0.3437 | 0.0595 | 0.0207 | 0.7645 | 0.6375 | 0.1019 | 0.1600 |
 | run_07 | 0.1923 | 0.0783 | 0.0157 | 0.7955 | 0.7343 | 0.0897 | 0.1422 |
 | run_08 | 0.4085 | 0.0952 | 0.0437 | 0.8123 | 0.5692 | 0.0999 | 0.1443 |
-| run_10 | 0.0986 | 0.0524 | 0.0433 | 0.8178 | 0.6929 | 0.1134 | 0.1457 |
+| **run_10** | **0.0986** | **0.0524** | **0.0433** | **0.8178** | **0.6929** | 0.1134 | 0.1457 |
 
 run_10 meets all three KL targets and both mean-heatmap SSIM targets. run_06, run_07, and run_08 meet the return KL targets but miss the spread target. run_07 has the highest price-indexed mean SSIM among the runs shown.
 
