@@ -2,6 +2,62 @@
 
 TimeGAN generates 100-event limit-order-book sequences from LOBSTER AMZN data.
 
+## Requirements
+
+Runtime dependencies are listed in [requirements.txt](requirements.txt): PyTorch, NumPy, pandas, Matplotlib, scikit-image, and Pillow. The main pipeline runs on either the CPU or with CUDA. GPU training requires an NVIDIA driver and a compatible CUDA-enabled PyTorch build.
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+## Usage
+
+Run commands from the project directory with the environment activated.
+
+### 1. Prepare data
+
+```bash
+python get_dataset.py
+```
+
+The default downloads and extracts the AMZN 2012-06-21 Level-10 sample into the data directory expected by [dataset.py](dataset.py). Internet access is required for this step. Alternatively, place the paired message/order-book CSV files in that local data directory. `python get_dataset.py --all` downloads all available samples; use the default single sample to match the reported experiment, since additional files change the dataset.
+
+### 2. Train
+
+Review the constants near the top of [train.py](train.py), including `CKPT_DIR`, batch size, epochs, and the hyperparameters below. Set a fresh local output directory for each experiment, then run:
+
+```bash
+python -u train.py
+```
+
+For Jupyter, select the project environment, use this directory as the working directory, and paste the complete file into a cell. Restart the kernel after changing imported model code. Training runs autoencoder pretraining, supervisor pretraining, and joint adversarial training. It saves the selected, periodic, and final model states with feature-scaling statistics and configuration. Stage timing and peak GPU-memory summaries are printed and saved locally.
+
+### 3. Generate
+
+Set `MODEL_FILE` to the trained model you want to use; the following path is a placeholder, not a bundled file:
+
+```bash
+export MODEL_FILE="/absolute/path/to/your/model.pt"
+MPLBACKEND=Agg python predict.py "$MODEL_FILE" --samples 1000
+```
+
+[predict.py](predict.py) exports generated features, decoded order-book arrays and CSV data, and a snapshot figure. `--samples` controls the number of independently generated windows. Existing prediction outputs are replaced.
+
+### 4. Evaluate
+
+```bash
+MPLBACKEND=Agg python evaluate.py "$MODEL_FILE"
+```
+
+[evaluate.py](evaluate.py) generates its own evaluation samples; running prediction first is optional. It prints KL, SSIM, and temporal diagnostics and saves a JSON summary and diagnostic figures locally. See [Evaluation script](#evaluation-script) for definitions and interpretation. CPU or GPU selection is automatic; on a cluster, run inside the GPU allocation and verify CUDA availability with:
+
+```bash
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+```
+
 ## Model overview
 
 The model adapts TimeGAN, introduced by Yoon, Jarrett, and van der Schaar in [*Time-series Generative Adversarial Networks* (NeurIPS 2019)](https://papers.neurips.cc/paper_files/paper/2019/hash/c9efe5f26cd17ba6216bbe2a7d26d490-Abstract.html), a recurrent generative adversarial framework for sequences. It learns both a representation of real order books and the temporal relationships between events. A generator then creates synthetic sequences in that learned representation, and a recoverer converts them back into order-book features. Generation starts from random noise; it does not require a real order-book window as input.
