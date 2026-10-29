@@ -60,7 +60,7 @@ $$
 $E$ learns a causal representation of the observed sequence; $R$ reconstructs its features. Both are GRU networks here, so an output at event $t$ may use preceding events. Following the reconstruction objective in paper Eq. (7), the implementation uses mean squared error over batch, event and feature dimensions:
 
 $$
-\mathcal L_R=\operatorname{MSE}(X,\widetilde X).
+\mathcal L_R=\text{MSE}(X,\widetilde X).
 $$
 
 A low $\mathcal L_R$ means real sequences survive the embedding/recovery path; it does not establish that noise-generated sequences are realistic.
@@ -76,12 +76,12 @@ $$
 $\widehat E$ denotes the generator's intermediate latent output, not the embedder. The supervised objective follows the next-step latent-matching idea of paper Eq. (9), with the explicit alignment used in code:
 
 $$
-\mathcal L_S=\operatorname{MSE}\!\left(F(H)_{1:T-1},H_{2:T}\right).
+\mathcal L_S=\text{MSE}\!\left(F(H)_{1:T-1},H_{2:T}\right).
 $$
 
 The supervisor learns from real latent histories rather than only a discriminator's judgement. Its output at event $t$ targets the real latent vector at $t+1$; during generation it transforms the synthetic latent sequence.
 
-**Adversarial learning.** Write $D(H)=\operatorname{sigmoid}(d_{\theta_D}(H))$ for real probabilities. The temporal-only form of the paper's adversarial value function (Eq. (8)) is:
+**Adversarial learning.** Write $D(H)=\text{sigmoid}(d_{\theta_D}(H))$ for real probabilities. The temporal-only form of the paper's adversarial value function (Eq. (8)) is:
 
 $$
 V(D,G)=\mathbb E_X\!\left[\sum_t\log D(H)_t\right]
@@ -90,19 +90,19 @@ $$
 
 The discriminator maximises this value while generation tries to fool it. Paper Eqs. (10)–(11) additionally combine reconstruction with $\lambda\mathcal L_S$ for embedding/recovery, and adversarial learning with $\eta\mathcal L_S$ for generation. Those are the framework's objectives, not the exact weighted expressions implemented here.
 
-In code, $\operatorname{BCE}$ averages binary cross-entropy over batch and events. It is evaluated directly on logits using `BCEWithLogitsLoss` for numerical stability. The discriminator also sees the generator output before supervision:
+In code, $\text{BCE}$ averages binary cross-entropy over batch and events. It is evaluated directly on logits using `BCEWithLogitsLoss` for numerical stability. The discriminator also sees the generator output before supervision:
 
 $$
 \mathcal L_D=
-\operatorname{BCE}(D(H),1)
-+\operatorname{BCE}(D(\widehat H),0)
-+\gamma\operatorname{BCE}(D(\widehat E),0),
+\text{BCE}(D(H),1)
++\text{BCE}(D(\widehat H),0)
++\gamma\text{BCE}(D(\widehat E),0),
 $$
 
 $$
 \mathcal L_A=
-\operatorname{BCE}(D(\widehat H),1)
-+\gamma\operatorname{BCE}(D(\widehat E),1),\qquad \gamma=1.
+\text{BCE}(D(\widehat H),1)
++\gamma\text{BCE}(D(\widehat E),1),\qquad \gamma=1.
 $$
 
 The generator uses the non-saturating real-target loss $\mathcal L_A$, rather than directly minimising the logarithmic fake term in $V$. Real latent targets are detached during G/S updates; during discriminator updates both real and synthetic latent inputs are detached.
