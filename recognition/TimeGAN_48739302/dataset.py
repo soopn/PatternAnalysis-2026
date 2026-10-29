@@ -1,3 +1,37 @@
+"""Load paired LOBSTER CSV files and construct 42-channel model features.
+
+LOBSTERDataset discovers message files recursively beneath root and pairs each
+with the orderbook file obtained by replacing 'message' with 'orderbook'. Files
+have no header and must contain matching rows. Each ten-level order-book row
+is [ask price, ask size, bid price, bid size] repeated from level 1 to 10.
+Prices use LOBSTER units (dollars times 10,000); sizes are shares. Message columns
+are time in seconds after midnight, event type, order ID, size, price, direction.
+An added seventh column stores the inter-event interval in seconds.
+
+Rows are filtered to [start_time, end_time) before stride-one windows are built.
+Windows never cross file or selected-period boundaries and overlap heavily.
+The dataset retains tensor views of the loaded arrays in memory; it does not
+stream CSV rows or shuffle them. A DataLoader supplies batching/sampling.
+
+LOBFeatureTransform maps raw windows to this per-event layout:
+    channels 4*l : 4*l+4, l=0..9:
+        ask gap (ticks), log1p ask size, bid gap (ticks), log1p bid size.
+        The first gap on each side is its distance from the midprice; deeper
+        gaps are increments between consecutive occupied price levels.
+    channel 40: asinh(midprice change in ticks), zero at each window's start.
+    channel 41: log1p(inter-event seconds * 1,000,000).
+
+Empty/sentinel levels contribute zero gaps; negative sizes are clipped before
+log conversion. A row without any valid quote on either side raises ValueError.
+The transform does not repair or impose a valid generated quote grid; predict.py
+handles generation-time decoding.
+
+Typical pipeline: instantiate time-filtered datasets, transform raw training
+batches, fit the scaler only on those training features, then normalise every
+split with the same fitted statistics. inverse_normalise() reverses scaling
+only; it does not recover raw prices from gaps or undo log/asinh transforms.
+"""
+
 from pathlib import Path
 
 import torch
@@ -20,6 +54,15 @@ class LOBSTERDataset(Dataset):
     """
     Sequence-based LOBSTER dataset.
 
+    Args:
+        root: Directory containing paired message/orderbook CSV files.
+        seq_len: Number of consecutive events in each stride-one window.
+        start_time: Inclusive lower bound in seconds after midnight, or None.
+        end_time: Exclusive upper bound in seconds after midnight, or None.
+
+    Missing pairs and files shorter than seq_len after filtering are skipped
+    with a message. Unequal message/book row counts raise ValueError.
+
     Each item is a temporal window:
         message:   [seq_len, 7]  (6 LOBSTER columns + dt to the previous event, s)
         orderbook: [seq_len, 4 * levels]
@@ -29,7 +72,10 @@ class LOBSTERDataset(Dataset):
 
     The inter-event time dt is computed in float64 on the whole file before
     anything is cast to float32. Raw timestamps (~3e4 s) cannot resolve
-    sub-millisecond differences in float32.
+    sub-millisecond differences in float32. The first row of each file has
+    dt=0; negative intervals are clipped to zero. Filtering retains intervals
+    computed before the period boundary, so its first dt may refer to a row
+    outside that period. Returned message/book tensors are float32.
     """
 
     def __init__(
@@ -105,9 +151,15 @@ class LOBSTERDataset(Dataset):
         return torch.tensor(df.values, dtype=dtype)
 
     def __len__(self):
+        """Return the number of available overlapping event windows."""
         return len(self.samples)
 
     def __getitem__(self, idx):
+        """Return raw message/orderbook tensors for one window.
+
+        These tensors share storage with other overlapping windows; callers
+        should avoid in-place modification. Feature conversion is separate.
+        """
         messages, orderbook = self.samples[idx]
 
         return {
@@ -120,6 +172,9 @@ class LOBFeatureTransform:
     """Convert raw LOBSTER Level-10 order books + messages into model features.
 
     Output (N_FEATURES = 42 per timestep), see the layout at the top of file.
+    The leading batch dimension is optional. fit() consumes already transformed,
+    unstandardised feature batches and stores channel-wise float32 mean/std.
+    Statistics broadcast over event/batch dimensions on the input device.
 
     Args:
         tick_size: price increment in raw LOBSTER units (prices are scaled
@@ -237,7 +292,13 @@ class LOBFeatureTransform:
         )
 
     def fit(self, feature_batches):
-        """Fit standardisation statistics on unstandardised training features."""
+        """Fit channel statistics from an iterable of transformed training batches.
+
+        All leading dimensions count as observations; overlapping windows count
+        their repeated events again. Accumulation uses float64 and population
+        variance, with standard deviations floored at 1e-6. Empty input raises
+        ValueError. Returns self; never fit on validation/test features.
+        """
         total = None
         total_sq = None
         count = 0
@@ -270,6 +331,10 @@ class LOBFeatureTransform:
         return self
 
     def normalise(self, features):
+        """Standardise transformed features using fitted channel statistics.
+
+        Preserves shape/device. Raises RuntimeError if statistics are unset.
+        """
         if self.mean is None or self.std is None:
             raise RuntimeError("Call fit() on training data first.")
 
@@ -279,6 +344,10 @@ class LOBFeatureTransform:
         return (features - mean) / std
 
     def inverse_normalise(self, features):
+        """Undo standardisation, retaining the 42-channel transformed layout.
+
+        Preserves shape/device. Raises RuntimeError if statistics are unset.
+        """
         if self.mean is None or self.std is None:
             raise RuntimeError("Call fit() on training data first.")
 

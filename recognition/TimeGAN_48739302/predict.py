@@ -1,5 +1,22 @@
 """Generate synthetic LOBSTER Level-10 order books from a trained TimeGAN.
 
+Usage:
+    python predict.py /path/to/local/model.pt --samples 1000
+
+The optional model argument defaults to the generic local CHECKPOINT below.
+Supply your trained model file; model weights are not bundled with the source. Run from the project
+root so local model files and LOBSTER_DATA/ can be found. Generation uses seed
+SEED and the saved training noise law. generate_sequences() runs without
+parameter updates, uses EMA when ready, and drops BURN_IN leading events from
+each independently generated window. Long sequences are extrapolation beyond
+the trained 100-event horizon, not a guaranteed full-session simulation.
+
+A fitted scaler is restored with the model. The inference path returns features
+in original transform units before decoding prices, sizes and event times.
+SPARSIFY=1 explicitly enables an optional training-data-calibrated hold filter;
+it is disabled by default. REAL_PERIOD selects the real period for callers of
+real_period(); main() anchors generated windows using real test midprices.
+
 Writes:
     out/generated_features.npy   (N, T, 42) features in original units
     out/generated_raw_lob.npy    (N, T, 40) LOBSTER-style rows
@@ -42,7 +59,7 @@ SEQ_LEN = 100
 N_SAMPLES = 1000
 TICK_SIZE = 100.0  # $0.01 * 1e4
 TEST_START, TEST_END = 52_200, 57_600
-CHECKPOINT = "checkpoints/timegan_best.pt"
+CHECKPOINT = "checkpoints/timegan_best.pt"  # local model; or pass a CLI path
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEED = 123
 EMPTY_VOL = 0.5  # volumes are integers >= 1, so < 0.5 means "empty level"
@@ -61,6 +78,13 @@ def real_period():
 
 
 def load_model(path=CHECKPOINT):
+    """Restore a local model and its fitted LOBFeatureTransform on DEVICE.
+
+    Saved constructor settings determine the architecture and noise law. Old
+    artifacts without settings use historical 42-feature defaults; incompatible
+    state dictionaries raise rather than silently inventing missing weights.
+    Returns (model, transform) with the model in evaluation mode.
+    """
     global SPARSE_PARAMS
     SPARSE_PARAMS = None
     checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
@@ -174,7 +198,11 @@ def structure_report(features):
 def decode_features(features, start_mid_ticks):
     """(N, T, 42) original-unit features -> structurally valid book.
 
-    start_mid_ticks: (N,) midprice at t=0 in ticks.
+    start_mid_ticks: (N,) intended midprice at t=0 in ticks. The first
+    generated price increment is reset to zero. Quote rounding can shift the
+    actual average best-quote price by half a tick from the intended mid.
+    Volumes are rounded to nonnegative integer shares; time increments are
+    decoded from the model's transformed inter-event-time feature.
 
     Returns a dict of arrays (prices in ticks, volumes in shares):
         ask_price, ask_vol, bid_price, bid_vol : (N, T, 10)
@@ -271,6 +299,11 @@ def plot_generated_lob(dec, sample_idx=0, timestep=0, path="figs/generated_lob.p
 
 
 def main():
+    """Generate independent windows, report raw violations and export books.
+
+    Existing output arrays/CSV and the snapshot figure are replaced. A plotted
+    snapshot is illustrative; it does not compute distribution quality metrics.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", nargs="?", default=CHECKPOINT)
     parser.add_argument("--samples", type=int, default=N_SAMPLES)

@@ -1,3 +1,30 @@
+"""Recurrent TimeGAN networks and their optimisation objectives.
+
+All network inputs use batch-first tensors: (batch, events, channels).
+The embedder maps standardised observed features into latent states; the
+recoverer maps latent states back to feature space. Generation follows
+noise -> generator -> supervisor -> recoverer. The discriminator scores
+real and synthetic latent sequences with logits, not probabilities.
+
+Training has three stages: E/R reconstruction, supervisor next-step prediction,
+and alternating joint G/S, E/R, and discriminator updates. G/S and E/R each
+share an optimiser/objective; their logged losses are not separate per-network
+losses. Joint G/S terms include adversarial, supervised, moment, temporal,
+correlation, volume-event, and volatility objectives.
+
+``generator_auxiliary_scale`` scales non-adversarial G/S terms. An explicit
+``supervisor_loss_weight`` overrides that scaling only for sqrt(next-step
+latent MSE + epsilon). With None, the effective weight is 100 times the
+auxiliary scale, preserving older model behaviour. Reconstruction event losses
+are controlled separately by ``reconstruction_event_weight``.
+
+``model_config`` records constructor settings for inference. Feature mean/std
+buffers must be supplied from the training-fitted transform. EMA maintains
+copies of G/S/R, becomes active after init_ema(), and is used by generate()
+when ready unless use_ema=False. Generated outputs remain standardised;
+physical-unit conversion and quote-grid constraints belong to predict.py.
+"""
+
 import copy
 
 import torch
@@ -21,6 +48,8 @@ def initialise_recurrent(module):
 
 
 class Embedder(nn.Module):
+    """Map observed features (B, T, F) to sigmoid latent states (B, T, H)."""
+
     def __init__(
         self, input_dim, hidden_dim, num_layers=2, activation_fun=nn.Sigmoid()
     ):
@@ -39,6 +68,8 @@ class Embedder(nn.Module):
 
 
 class Recoverer(nn.Module):
+    """Decode latent states (B, T, H) into unconstrained features (B, T, F)."""
+
     def __init__(self, hidden_dim, output_dim, num_layers=2):
         super().__init__()
 
@@ -55,6 +86,8 @@ class Recoverer(nn.Module):
 
 
 class Generator(nn.Module):
+    """Map temporal noise (B, T, Z) to sigmoid latent states (B, T, H)."""
+
     def __init__(
         self, noise_dim, hidden_dim, num_layers=2, activation_fun=nn.Sigmoid()
     ):
@@ -74,6 +107,8 @@ class Generator(nn.Module):
 
 
 class Supervisor(nn.Module):
+    """Predict next-event latent states; training aligns output[:, :-1] with h[:, 1:]."""
+
     def __init__(self, hidden_dim, num_layers=1, activation_fun=nn.Sigmoid()):
         super().__init__()
 
@@ -91,6 +126,8 @@ class Supervisor(nn.Module):
 
 
 class Discriminator(nn.Module):
+    """Score latent sequences with logits, optionally using fixed training-fitted input scaling."""
+
     def __init__(self, hidden_dim, num_layers=2, input_mode="raw"):
         super().__init__()
         if input_mode not in ("raw", "standardised"):
@@ -134,7 +171,13 @@ class Discriminator(nn.Module):
 
 
 class TimeGAN(nn.Module):
-    """TimeGAN model wrapper"""
+    """Own the five networks, optimisers, feature statistics, and EMA copies.
+
+    Input/output feature width is input_dim; hidden_dim sets latent width and
+    noise_dim sets the generator input width. Constructor defaults support
+    legacy models; train.py explicitly supplies the active experiment preset.
+    Training step methods update parameters and return detached scalar losses.
+    """
 
     def __init__(
         self,
@@ -419,6 +462,12 @@ class TimeGAN(nn.Module):
         return self.generator, self.supervisor, self.recoverer
 
     def generate(self, batch_size, seq_len=None, use_ema=True):
+        """Return standardised synthetic features (batch_size, events, input_dim).
+
+        Each call starts fresh recurrent states. seq_len defaults to the trained
+        window length; longer generation extrapolates beyond that horizon.
+        The caller is responsible for disabling gradients during inference.
+        """
         if seq_len is None:
             seq_len = self.seq_len
 
@@ -699,7 +748,12 @@ class TimeGAN(nn.Module):
         return loss_d.detach().item()
 
     def train_joint_step(self, x, profile_gradients=False):
-        """Adversarial training step"""
+        """Alternate G/S, E/R and D updates for one standardised real batch.
+
+        Returns shared objective losses and real/fake discriminator scores.
+        Optional gradient profiling samples objective contributions; it does
+        not introduce an additional optimiser step. EMA updates follow training.
+        """
 
         # update generator and embedder/recoverer twice per discriminator step
         for step in range(self.gen_steps):

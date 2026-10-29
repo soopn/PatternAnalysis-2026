@@ -1,13 +1,35 @@
-"""
-Core investigations:
-    - does TimeGAN learn and enforce the structural constraints compared
-      to a standard baseline generator
-    - does it reproduce authentic volatility clustering or noise/mode collapse
+"""Train TimeGAN on LOBSTER windows, directly or pasted into Jupyter.
 
-Recommendations:
-    - compute KL divergence on spreads/returns (target KL <= 0.1)
-    - evaluate depth heatmap structural similarity (price levels x time steps)
-      (target SSIM > 0.6)
+Run from the project directory with dataset.py and modules.py importable and
+local LOBSTER CSV data under LOBSTER_DATA/. Edit the constants below before
+execution; there is no argument parser, so Jupyter kernel arguments are ignored.
+Restart the kernel after changing imported model code. Executing the complete
+file in a notebook runs training through its __main__ block.
+
+The default sequence length is 100 events. Real data is split by clock time:
+09:30–13:00 for training and 13:00–14:30 for validation. The 14:30–16:00 test
+period is not used here. Feature scaling is fitted only on training data.
+Overlapping stride-one windows are sampled without replacement within an epoch;
+each epoch uses up to STEPS_PER_EPOCH batches rather than a full data pass.
+
+Training stages:
+    1. AUTOENCODER_EPOCHS: embedder/recoverer reconstruction and volume events.
+    2. SUPERVISOR_EPOCHS: next-step prediction on embedded real sequences.
+    3. JOINT_EPOCHS: alternating generator/supervisor, embedder/recoverer, and
+       discriminator updates, with EMA generation and validation diagnostics.
+
+Configuration is explicit: learning rate, Adam beta1, noise law, initialisation,
+pooled/per-timestep moments, discriminator conditioning, auxiliary scale, and
+independent supervisor weight. These settings are passed to TimeGAN and saved
+with feature statistics. CKPT_DIR controls local model output; use a fresh
+folder for each experiment. Model files are local outputs, not bundled assets.
+Best-model selection minimises validation
+moment_gap after MIN_BEST_EPOCH, not test KL, SSIM, or reconstruction MSE.
+
+Logs contain shared G/S and E/R training objectives, D loss, reconstruction and
+volume-event validation losses, supervisor error versus latent persistence,
+discriminator diagnostics, and optional sampled G/S gradients/loss components.
+Sampled components describe the first joint batch, not an epoch mean.
 """
 
 import random
@@ -46,7 +68,7 @@ MIN_BEST_EPOCH = (
 )
 
 # Edit these settings before pasting this file into a Jupyter cell.
-CKPT_DIR = Path("checkpoints/supervisor_weight_B_v1")
+CKPT_DIR = Path("checkpoints")  # local output directory; set before training
 RECONSTRUCTION_EVENT_WEIGHT = 1.0  # 0.0 gives the MSE-only reconstruction baseline
 LEARNING_RATE = 1e-4
 ADAM_BETA1 = 0.5
@@ -231,6 +253,11 @@ def run_validation(model, loader, transform, with_generation=False):
 
 
 def save_checkpoint(model, transform, path, **extra):
+    """Save model/EMA state, constructor settings, scaler and diagnostics.
+
+    Optimiser state is not saved; loading this artifact restores inference,
+    not an exact optimiser-level continuation of the training session.
+    """
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -256,6 +283,11 @@ def save_checkpoint(model, transform, path, **extra):
 
 
 def main(model, train_loader, eval_loader, transform):
+    """Run all three training stages and save best, periodic, and final models.
+
+    Loaders supply raw book/message windows; transform converts each batch to
+    training-standardised features. Validation generation uses held-out windows.
+    """
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
     # embedder + recoverer autoencoder
