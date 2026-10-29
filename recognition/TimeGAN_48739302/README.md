@@ -57,9 +57,53 @@ During generation, noise passes through the generator, supervisor, and the same 
 
 1. Reconstruction pretraining: train the embedder and recoverer to reproduce real features.
 2. Supervisor pretraining: train next-event prediction on real latent sequences.
-3. Joint training: alternate generator/supervisor, embedder/recoverer, and discriminator updates. Adversarial and statistical objectives encourage synthetic sequences to match real distributions and temporal behaviour. The current implementation also includes volume-event reconstruction terms.
+3. Joint training: alternate generator/supervisor, embedder/recoverer, and discriminator updates. Adversarial and statistical objectives encourage synthetic sequences to match real distributions and temporal behaviour. Optional volume-event reconstruction terms are available but disabled in the restored preset.
 
 The embedder and discriminator are used during training; synthetic features are produced by the generator → supervisor → recoverer path. Training settings vary across experiments, so the results below compare runs rather than isolate a single architectural change.
+
+## Training hyperparameters
+
+| Setting | Value |
+|---|---|
+| Events per window / input features | 100 / 42 |
+| Hidden width / noise width | 128 / 64 |
+| GRU layers | 2 for E/R/G/D; 1 for the supervisor |
+| Batch size | 128 |
+| Optimiser | Adam, learning rate 0.001, betas (0.9, 0.999) |
+| Initialisation | PyTorch defaults |
+| Noise | Uniform marginals; half AR(1)-correlated with rho 0.7, half constant within each sequence |
+| Moment matching | Across the batch at each timestep |
+| Discriminator inputs | Raw latent values |
+| Autoencoder / supervisor / joint epochs | 100 / 100 / 200 |
+| Training batches per epoch | Up to 200, sampled without replacement |
+| G/S and E/R updates per discriminator step | 2 each |
+| Discriminator update threshold | Summed discriminator loss > 0.6 |
+| Fake-generator discriminator branch coefficient (gamma) | 1 |
+| EMA decay | 0.999 for generator, supervisor, and recoverer |
+| Random seed | 69 |
+| Scaler fitting stride | Every 10th training window |
+| Validation subset | Up to 2,560 evenly spaced windows |
+| Model selection | Minimum validation moment/roughness/correlation/autocorrelation/within-window discrepancy after epoch 30 |
+| Validation generation warm-up | 0 events |
+
+Effective joint generator/supervisor loss coefficients:
+
+| Loss term | Coefficient |
+|---|---:|
+| Adversarial (including generator-only branch with gamma=1) | 10 |
+| Square root of next-step latent MSE | 100 |
+| Feature mean/std matching | 100 |
+| Step-to-step roughness | 100 |
+| Feature correlation | 50 |
+| Feature autocorrelation | 50 |
+| Latent autocorrelation | 50 |
+| Within-window statistics | 50 |
+| Global non-adversarial auxiliary multiplier | 1 |
+| Additional event-distribution / volatility objectives | 0 / 0 |
+
+Autoencoder pretraining uses reconstruction MSE. Supervisor pretraining uses next-step latent MSE. Joint E/R training uses `10 * sqrt(reconstruction MSE + epsilon) + 0.1 * latent next-step MSE`. Additional event reconstruction terms are disabled, as are event/volatility additions to the model-selection score.
+
+The numerical autocorrelation stability fix, fixed-seed chunked validation, richer diagnostics, configuration recording, and time/VRAM reporting remain. These are implementation differences from the recovered files. The recovered code enables EMA during joint training; the saved run_10 used ordinary weights, so that historical discrepancy remains relevant when comparing results. The 20-event warm-up described in the results protocol below belongs to prediction/evaluation, not training validation.
 
 ## Results
 
@@ -96,18 +140,23 @@ Spread and return KL exceed the targets. The two depth representations help dist
 ### run_04: severe failure
 
 Spread KL is 10.7452 and price-indexed mean SSIM is negative. The level view still exposes generated volume when the price-band view contains little or no displayed liquidity.
+  - Added smoothing to moment calculation to fix flicker in run_02
+  - Generator was ignoring discriminator output, added weights to discriminator loss
 
 ![Real and generated order-book depth for run_04](figs/orderbooks/run_04.png)
 
 ### run_06: improved returns, remaining spread mismatch
 
 Both return KL scores pass, and both mean-map SSIM scores exceed 0.6. Spread KL remains 0.3437.
+  - changed weights to observe hyper params
 
 ![Real and generated order-book depth for run_06](figs/orderbooks/run_06.png)
 
 ### run_07: strong average depth structure
 
 Price-indexed mean SSIM reaches 0.7343. Return KL passes, while spread KL remains above target at 0.1923.
+  - divergent generator losses
+  - added ema for sampling
 
 ![Real and generated order-book depth for run_07](figs/orderbooks/run_07.png)
 
@@ -133,7 +182,7 @@ The animation displays all ten bid volumes (blue) and ten ask volumes (orange) a
 
 ## Model and development notes
 
-The representation expanded from 40 features in run_01 to 42 in the evaluated runs: ten levels of ask/bid price gaps and log volumes, plus asinh midprice change and log inter-event time. This supports explicit spread, return, and event-time analysis. Detailed training settings were not retained for these early experiments, so the score changes cannot reliably be attributed to individual loss weights or optimisation changes.
+The representation expanded from 40 features in run_01 to 42 in the evaluated runs: ten levels of ask/bid price gaps and log volumes, plus asinh midprice change and log inter-event time. This supports explicit spread, return, and event-time analysis. Recovered source files establish the run_10 training preset listed above. Settings for the other early experiments are incomplete, so score differences cannot reliably be attributed to individual changes.
 
 ## Evaluation protocol
 
