@@ -99,9 +99,8 @@ Effective joint generator/supervisor loss coefficients:
 | Latent autocorrelation | 50 |
 | Within-window statistics | 50 |
 | Global non-adversarial auxiliary multiplier | 1 |
-| Additional event-distribution / volatility objectives | 0 / 0 |
 
-Autoencoder pretraining uses reconstruction MSE. Supervisor pretraining uses next-step latent MSE. Joint E/R training uses `10 * sqrt(reconstruction MSE + epsilon) + 0.1 * latent next-step MSE`. Additional event reconstruction terms are disabled, as are event/volatility additions to the model-selection score.
+Autoencoder pretraining uses reconstruction MSE. Supervisor pretraining uses next-step latent MSE. Joint E/R training uses `10 * sqrt(reconstruction MSE + epsilon) + 0.1 * latent next-step MSE`. 
 
 The numerical autocorrelation stability fix, fixed-seed chunked validation, richer diagnostics, configuration recording, and time/VRAM reporting remain. These are implementation differences from the recovered files. The recovered code enables EMA during joint training; the saved run_10 used ordinary weights, so that historical discrepancy remains relevant when comparing results. The 20-event warm-up described in the results protocol below belongs to prediction/evaluation, not training validation.
 
