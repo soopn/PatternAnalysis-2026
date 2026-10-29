@@ -18,8 +18,6 @@ Targets: **KL <= 0.1** for spreads and returns, and **SSIM > 0.6**. KL is measur
 | run_08 | 0.4085 | 0.0952 | 0.0437 | 0.8123 | 0.5692 | 0.0999 | 0.1443 |
 | run_10 | 0.0986 | 0.0524 | 0.0433 | 0.8178 | 0.6929 | 0.1134 | 0.1457 |
 
-[Download the results table](results/run_metrics.csv).
-
 **run_10 meets all three KL targets and both mean-heatmap SSIM targets.** run_06, run_07, and run_08 meet the return KL targets but miss the spread target. run_07 has the highest price-indexed mean SSIM among the runs shown.
 
 Mean-heatmap SSIM compares average depth profiles across 500 windows. Pair SSIM compares individual, unpaired real and generated windows. These measure different properties: **none of the runs shown achieves pair SSIM above 0.6**. The mean-map results therefore do not establish realistic individual event dynamics.
@@ -60,6 +58,20 @@ Spread KL is 0.0986, one-step return KL is 0.0524, and ten-step return KL is 0.0
 
 ![Real and generated order-book depth for run_10](figs/orderbooks/run_10.png)
 
+## run_10: generated period
+
+All figures and the animation below show **generated window 0: 100 events, indexed 0–99**, matching the run_10 order-book example and the generation horizon used for the reported metrics. Every event is displayed; these are generated-only views of the same window, not a longer extrapolated sequence. Event index is not clock time.
+
+![run_10 generated midprice, spread and imbalance over 100 events](figs/orderbooks/run_10_test_period_overview.png)
+
+![run_10 generated bid depth over 100 events](figs/orderbooks/run_10_test_period_bid_depth.png)
+
+![run_10 generated ask depth over 100 events](figs/orderbooks/run_10_test_period_ask_depth.png)
+
+The animation displays all ten bid volumes (blue) and ten ask volumes (orange) at each of the 100 events. The volume axis stays fixed, and playback is 10 frames per second.
+
+![run_10 generated volumes across the 100-event evaluation window](figs/orderbooks/run_10_generated_volumes.gif)
+
 ## Model and development notes
 
 The model combines an embedder, recoverer, generator, supervisor, and discriminator. Autoencoder pretraining learns the feature representation; supervisor pretraining learns next-step latent dynamics; joint adversarial training learns generation and reconstruction together.
@@ -73,17 +85,9 @@ The representation expanded from 40 features in run_01 to 42 in the evaluated ru
 - Spread KL uses real-data quantile bins; one-step return KL uses half-tick bins; ten-step return KL uses real-data quantile bins. All runs use the same real test reference.
 - The figures illustrate single windows; the scores summarise the full evaluation set. Neither the figures nor passing histogram scores establish that event sparsity and temporal dependence are correct.
 
-## Plotting
+## Source files
 
-With the local evaluation arrays and LOBSTER data available:
-
-```bash
-venv/bin/python plot_notable_orderbooks.py
-```
-
-Training losses can be plotted from saved console output:
-
-```bash
-venv/bin/python plot_losses.py print_log.txt
-venv/bin/python plot_selected_losses.py print_log.txt
-```
+- [dataset.py](dataset.py): LOBSTER loading, feature layout, and training-fitted standardisation.
+- [modules.py](modules.py): recurrent networks, training objectives, and generation.
+- [train.py](train.py): training stages, and validation.
+- [predict.py](predict.py): model loading, feature decoding, and generated output formats.
