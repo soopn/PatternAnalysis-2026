@@ -175,7 +175,6 @@ Effective joint generator/supervisor loss coefficients:
 
 Autoencoder pretraining uses reconstruction MSE. Supervisor pretraining uses next-step latent MSE. Joint E/R training uses `10 * sqrt(reconstruction MSE + epsilon) + 0.1 * latent next-step MSE`. 
 
-The numerical autocorrelation stability fix, fixed-seed chunked validation, richer diagnostics, configuration recording, and time/VRAM reporting remain. These are implementation differences from the recovered files. The recovered code enables EMA during joint training; the saved run_10 used ordinary weights, so that historical discrepancy remains relevant when comparing results. The 20-event warm-up described in the results protocol below belongs to prediction/evaluation, not training validation.
 
 ## Results
 
@@ -296,6 +295,24 @@ The script prints metric tables and quantiles, writes a local JSON summary, and 
 - [train.py](train.py): training stages, and validation.
 - [predict.py](predict.py): model loading, feature decoding, and generated output formats.
 - [evaluate.py](evaluate.py): distribution metrics, depth similarity, and temporal diagnostics.
+
+## Feasibility Report
+
+Hardware: **one NVIDIA L40S GPU**, with [48 GB of device memory](https://docs.nvidia.com/nim/large-language-models/1.1.0/support-matrix.html). 
+
+| Stage | Epochs | Approximate elapsed time |
+|---|---:|---:|
+| Autoencoder pretraining | 100 | ~10 minutes |
+| Supervisor pretraining | 100 | ~15 minutes |
+| Joint adversarial training | 200 | ~1 hour 30 minutes |
+| Total Training Time | 400 | ~1 hour 55 minutes |
+
+VRAM budget: roughly 2–4 GiB for the training process**, assuming FP32, batch size 128, 100-event sequences, 128 hidden channels, the configured validation workload, and gradient diagnostics. 
+
+- Intended User Scope -> backtesters
+- Prototype Purpose -> creating useful data for quantitative analysis or backtesting algorithm
+- Acceptance Criteria -> KL divergence (spreads/returns) <= 0.1, SSIM mean > 0.6
+- Key Risks -> Sensitive divergence, unrepresentative volatility windows, crossed orderbooks
 
 ## References
 
