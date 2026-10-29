@@ -2,7 +2,7 @@
 
 ## Requirements
 
-Runtime dependencies are listed in [requirements.txt](requirements.txt): PyTorch, NumPy, pandas, Matplotlib, scikit-image, and Pillow. The main pipeline runs on either the CPU or with CUDA. GPU training requires an NVIDIA driver and a compatible CUDA-enabled PyTorch build.
+Runtime dependencies are listed in [requirements.txt](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/requirements.txt): PyTorch, NumPy, pandas, Matplotlib, scikit-image, and Pillow. The main pipeline runs on either the CPU or with CUDA. GPU training requires an NVIDIA driver and a compatible CUDA-enabled PyTorch build.
 
 ```bash
 python3 -m venv venv
@@ -21,11 +21,11 @@ Run commands from the project directory with the environment activated.
 python get_dataset.py
 ```
 
-The default downloads and extracts the AMZN 2012-06-21 Level-10 sample into the data directory expected by [dataset.py](dataset.py). Internet access is required for this step. Alternatively, place the paired message/order-book CSV files in that local data directory. `python get_dataset.py --all` downloads all available samples; use the default single sample to match the reported experiment, since additional files change the dataset.
+The default downloads and extracts the AMZN 2012-06-21 Level-10 sample into the data directory expected by [dataset.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/dataset.py). Internet access is required for this step. Alternatively, place the paired message/order-book CSV files in that local data directory. `python get_dataset.py --all` downloads all available samples; use the default single sample to match the reported experiment, since additional files change the dataset.
 
 ### 2. Train
 
-Review the constants near the top of [train.py](train.py), including `CKPT_DIR`, batch size, epochs, and the hyperparameters below. Set a fresh local output directory for each experiment, then run:
+Review the constants near the top of [train.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/train.py), including `CKPT_DIR`, batch size, epochs, and the hyperparameters below. Set a fresh local output directory for each experiment, then run:
 
 ```bash
 python -u train.py
@@ -42,7 +42,7 @@ export MODEL_FILE="/absolute/path/to/your/model.pt"
 MPLBACKEND=Agg python predict.py "$MODEL_FILE" --samples 1000
 ```
 
-[predict.py](predict.py) exports generated features, decoded order-book arrays and CSV data, and a snapshot figure. `--samples` controls the number of independently generated windows. Existing prediction outputs are replaced.
+[predict.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/predict.py) exports generated features, decoded order-book arrays and CSV data, and a snapshot figure. `--samples` controls the number of independently generated windows. Existing prediction outputs are replaced.
 
 ### 4. Evaluate
 
@@ -50,7 +50,7 @@ MPLBACKEND=Agg python predict.py "$MODEL_FILE" --samples 1000
 MPLBACKEND=Agg python evaluate.py "$MODEL_FILE"
 ```
 
-[evaluate.py](evaluate.py) generates its own evaluation samples; running prediction first is optional. It prints KL, SSIM, and temporal diagnostics and saves a JSON summary and diagnostic figures locally. See [Evaluation script](#evaluation-script) for definitions and interpretation. CPU or GPU selection is automatic; on a cluster, run inside the GPU allocation and verify CUDA availability with:
+[evaluate.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/evaluate.py) generates its own evaluation samples; running prediction first is optional. It prints KL, SSIM, and temporal diagnostics and saves a JSON summary and diagnostic figures locally. See [Evaluation script](#evaluation-script) for definitions and interpretation. CPU or GPU selection is automatic; on a cluster, run inside the GPU allocation and verify CUDA availability with:
 
 ```bash
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
@@ -85,11 +85,11 @@ The implemented architecture uses 128 latent channels and 64 noise channels at e
 | Supervisor | One-layer GRU → linear layer → sigmoid | Learns next-event latent dynamics and transforms the generator's latent output before recovery. |
 | Discriminator | Two-layer GRU → linear layer | Produces real/fake logits at each event in latent space, providing the adversarial training signal. |
 
-![TimeGAN block diagram and training scheme from Figure 1 of the original paper](figs/ref/block_training_diagram.png)
+![TimeGAN block diagram and training scheme from Figure 1 of the original paper](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/ref/block_training_diagram.png)
 
 *Block diagram and training scheme, Figure 1 of [Yoon et al. (2019)](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf). Solid arrows show data propagation; dashed arrows in the training scheme show gradient paths. Reconstruction, supervised, and adversarial objectives train complementary parts of the model.*
 
-![Recurrent TimeGAN data flow from Figure 2a of the original paper](figs/ref/dataflow.png)
+![Recurrent TimeGAN data flow from Figure 2a of the original paper](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/ref/dataflow.png)
 
 *Recurrent data flow, Figure 2(a) of the same paper. The static-feature branches labelled $s$ and $h_S$ are omitted in this order-book implementation, which models temporal features only. The paper's illustrated recoverer is feedforward and its discriminator bidirectional; this implementation uses a recurrent recoverer and a unidirectional discriminator. Its separate supervisor provides the next-step latent prediction described below.*
 
@@ -103,7 +103,7 @@ During generation, noise passes through the generator, supervisor, and the same 
 
 ### Equations and training objectives
 
-The notation follows [Section 4 of the TimeGAN paper](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf), specialised to temporal order-book features. The equations below distinguish the paper's framework from the actual losses in [modules.py](modules.py). Let $X=(x_1,\ldots,x_T)$ be a standardised window, with $x_t\in\mathbb{R}^{42}$ and $T=100$. Let $H=(h_1,\ldots,h_T)$ contain 128-channel latent vectors, and $Z$ contain 64-channel noise vectors. Expectations are estimated using training batches.
+The notation follows [Section 4 of the TimeGAN paper](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf), specialised to temporal order-book features. The equations below distinguish the paper's framework from the actual losses in [modules.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/modules.py). Let $X=(x_1,\ldots,x_T)$ be a standardised window, with $x_t\in\mathbb{R}^{42}$ and $T=100$. Let $H=(h_1,\ldots,h_T)$ contain 128-channel latent vectors, and $Z$ contain 64-channel noise vectors. Expectations are estimated using training batches.
 
 **Embedding and recovery.** Corresponding to the mappings in paper Eqs. (3)–(4):
 
@@ -302,7 +302,7 @@ The following figures use generated window 0 and real test window 0 for every ru
 
 Spread and return KL exceed the targets. The two depth representations help distinguish a plausible average level profile from the placement of liquidity around the midprice.
 
-![Real and generated order-book depth for run_02](figs/orderbooks/run_02.png)
+![Real and generated order-book depth for run_02](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_02.png)
 
 ### run_04: severe failure
 
@@ -310,14 +310,14 @@ Spread KL is 10.7452 and price-indexed mean SSIM is negative. The level view sti
   - Added smoothing to moment calculation to fix flicker in run_02
   - Generator was ignoring discriminator output, added weights to discriminator loss
 
-![Real and generated order-book depth for run_04](figs/orderbooks/run_04.png)
+![Real and generated order-book depth for run_04](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_04.png)
 
 ### run_06: improved returns, remaining spread mismatch
 
 Both return KL scores pass, and both mean-map SSIM scores exceed 0.6. Spread KL remains 0.3437.
   - changed weights to observe hyper params
 
-![Real and generated order-book depth for run_06](figs/orderbooks/run_06.png)
+![Real and generated order-book depth for run_06](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_06.png)
 
 ### run_07: strong average depth structure
 
@@ -325,27 +325,27 @@ Price-indexed mean SSIM reaches 0.7343. Return KL passes, while spread KL remain
   - divergent generator losses
   - added ema for sampling
 
-![Real and generated order-book depth for run_07](figs/orderbooks/run_07.png)
+![Real and generated order-book depth for run_07](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_07.png)
 
 ### run_09: strongest combined metric result
 
 Spread KL is 0.0986, one-step return KL is 0.0524, and ten-step return KL is 0.0433. Mean SSIM is 0.8178 by level and 0.6929 by price. Individual-window similarity remains low despite these aggregate improvements.
 
-![Real and generated order-book depth for run_09](figs/orderbooks/run_09.png)
+![Real and generated order-book depth for run_09](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_09.png)
 
 ## run_09: generated period
 
 All figures and the animation below show generated window 0: 100 events, indexed 0–99, matching the run_09 order-book example and the generation horizon used for the reported metrics. Every event is displayed; these are generated-only views of the same window, not a longer extrapolated sequence. Event index is not clock time.
 
-![run_09 generated midprice, spread and imbalance over 100 events](figs/orderbooks/run_09_test_period_overview.png)
+![run_09 generated midprice, spread and imbalance over 100 events](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_09_test_period_overview.png)
 
-![run_09 generated bid depth over 100 events](figs/orderbooks/run_09_test_period_bid_depth.png)
+![run_09 generated bid depth over 100 events](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_09_test_period_bid_depth.png)
 
-![run_09 generated ask depth over 100 events](figs/orderbooks/run_09_test_period_ask_depth.png)
+![run_09 generated ask depth over 100 events](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_09_test_period_ask_depth.png)
 
 The animation displays all ten bid volumes (blue) and ten ask volumes (orange) at each of the 100 events. The volume axis stays fixed, and playback is 10 frames per second.
 
-![run_09 generated volumes across the 100-event evaluation window](figs/orderbooks/run_09_generated_volumes.gif)
+![run_09 generated volumes across the 100-event evaluation window](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/figs/orderbooks/run_09_generated_volumes.gif)
 
 ## Model and development notes
 
@@ -360,14 +360,14 @@ The representation expanded from 40 features in run_01 to 42 in the evaluated ru
 
 ## Evaluation script
 
-[evaluate.py](evaluate.py) evaluates a locally supplied trained model against real LOBSTER data. It generates fresh samples itself, so a separate prediction command is not required. Run it from the project directory, with the data available and dependencies including PyTorch, NumPy, pandas, Matplotlib, and scikit-image installed.
+[evaluate.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/evaluate.py) evaluates a locally supplied trained model against real LOBSTER data. It generates fresh samples itself, so a separate prediction command is not required. Run it from the project directory, with the data available and dependencies including PyTorch, NumPy, pandas, Matplotlib, and scikit-image installed.
 
 ```bash
 # Set MODEL_FILE to your local trained model before running.
 MPLBACKEND=Agg python evaluate.py "$MODEL_FILE"
 ```
 
-The model argument is optional; omitting it uses the generic local default in [predict.py](predict.py). The script loads the model's feature scaler and configuration, generates 500 windows of 100 events with seed 123 and a 20-event warm-up, and decodes them into order books. Each window starts at the initial midprice of its corresponding real test window. Real test windows are selected evenly across 14:30–16:00.
+The model argument is optional; omitting it uses the generic local default in [predict.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/predict.py). The script loads the model's feature scaler and configuration, generates 500 windows of 100 events with seed 123 and a 20-event warm-up, and decodes them into order books. Each window starts at the initial midprice of its corresponding real test window. Real test windows are selected evenly across 14:30–16:00.
 
 | Report | Interpretation |
 |---|---|
@@ -386,12 +386,12 @@ The script prints metric tables and quantiles, writes a local JSON summary, and 
 
 ## Source files
 
-- [dataset.py](dataset.py): LOBSTER loading, feature layout, and training-fitted standardisation.
-- [modules.py](modules.py): recurrent networks, training objectives, and generation.
-- [train.py](train.py): training stages, and validation.
-- [predict.py](predict.py): model loading, feature decoding, and generated output formats.
-- [evaluate.py](evaluate.py): distribution metrics, depth similarity, and temporal diagnostics.
-- [get_dataset.py](get_dataset.py): helper to download all available LOBSTER datasets
+- [dataset.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/dataset.py): LOBSTER loading, feature layout, and training-fitted standardisation.
+- [modules.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/modules.py): recurrent networks, training objectives, and generation.
+- [train.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/train.py): training stages, and validation.
+- [predict.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/predict.py): model loading, feature decoding, and generated output formats.
+- [evaluate.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/evaluate.py): distribution metrics, depth similarity, and temporal diagnostics.
+- [get_dataset.py](https://raw.githubusercontent.com/soopn/PatternAnalysis-2026/topic-recognition/recognition/TimeGAN_48739302/get_dataset.py): helper to download all available LOBSTER datasets
 
 ## Feasibility Report
 
