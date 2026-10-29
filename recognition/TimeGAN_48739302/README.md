@@ -235,6 +235,10 @@ There is evidence of **attenuated within-window variation and overly similar pat
 
 Generated books move too frequently while producing much smaller volume variation within each window. This combination is consistent with dense small fluctuations rather than realistic sparse book updates. The elevated correlation between generated spread paths suggests reduced temporal diversity. These observations support an under-dispersion/common-shape concern, but do not by themselves prove complete mode collapse or that noise is ignored.
 
+## Next Steps 
+- Configure model to train on all tickers, not just AMZN.
+- Test feasibility of reusing model for orderbooks of differing widths
+
 ## Order-book examples
 
 The following figures use generated window 0 and real test window 0 for every run. These are unpaired examples, chosen by index rather than visual quality. Each figure shows depth by level and depth by price relative to the contemporaneous midprice. Every figure uses the same real-data colour range and the same ±15-tick price band. Volumes outside the colour range saturate; prices outside the band are not displayed. Empty cells denote no displayed volume.
@@ -332,6 +336,7 @@ The script prints metric tables and quantiles, writes a local JSON summary, and 
 - [train.py](train.py): training stages, and validation.
 - [predict.py](predict.py): model loading, feature decoding, and generated output formats.
 - [evaluate.py](evaluate.py): distribution metrics, depth similarity, and temporal diagnostics.
+- [get_dataset.py](get_dataset.py): helper to download all available LOBSTER datasets
 
 ## Feasibility Report
 
