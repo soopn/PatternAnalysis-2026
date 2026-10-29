@@ -198,6 +198,43 @@ Mean-heatmap SSIM compares average depth profiles across 500 windows. Pair SSIM 
 
 `—` means unavailable. run_01 uses an earlier 40-feature representation and cannot be evaluated with the current 42-feature decoder. run_04 produces no usable ten-step return samples, so that entry is undefined rather than a pass.
 
+## Microstructure diagnostics and error analysis
+
+### Crossed and locked books
+
+A crossed book has best bid greater than best ask, while a locked book has equal best quotes. Among decoded rows with occupied, valid best quotes, both rates are 0.00% for generated and real data. Valid best quotes occur in **99.796%** of generated rows and **100%** of real rows.
+The absence of crossing is partly guaranteed by decoding: it enforces a spread of at least one tick, tick-aligned prices, and ordered deeper prices.
+
+### Volatility clustering
+
+Volatility clustering means that the **magnitude** of a price change remains dependent on earlier magnitudes, even when signed returns are weakly correlated. We measure autocorrelation of absolute midprice changes in ticks:
+
+| Event lag | Real absolute-return autocorrelation | Generated absolute-return autocorrelation |
+|---|---:|---:|
+| 1 | 0.180 | 0.350 |
+| 2 | 0.081 | 0.181 |
+| 5 | 0.115 | 0.156 |
+| 10 | 0.080 | 0.126 |
+
+The generated series exhibits clustering, but overstates its strength. Lag-1 dependence is approximately twice the real value. Signed-return lag-1 autocorrelation is also more negative (−0.257 generated versus −0.151 real), indicating excessive short-term reversal. Matching return histograms does not constrain these temporal relationships sufficiently.
+
+### Uncorrelated noise and partial collapse
+
+The samples have substantial temporal dependence: pooled lag-1 spread autocorrelation is 0.967 generated versus 0.978 real. Log-volume lag-1 autocorrelation, computed per level over all windows and then averaged, is 0.872 versus 0.896. Together with nonzero absolute-return autocorrelation, this argues against a wholesale collapse into uncorrelated noise. It does not establish correct dynamics.
+
+There is evidence of **attenuated within-window variation and overly similar path shapes**:
+
+| Diagnostic | Real | Generated |
+|---|---:|---:|
+| Zero one-step return share | 91.27% | 80.41% |
+| Median within-window spread standard deviation, ticks | 1.938 | 0.821 |
+| Median within-window log-volume standard deviation, across windows/levels | 0.697 | 0.128 |
+| Median number of volume levels changing per event, out of 20 | 1 | 17 |
+| Unchanged volume-entry share between consecutive events | 88.32% | 18.60% |
+| Mean spread-path correlation between randomly sampled distinct windows | 0.011 | 0.337 |
+
+Generated books move too frequently while producing much smaller volume variation within each window. This combination is consistent with dense small fluctuations rather than realistic sparse book updates. The elevated correlation between generated spread paths suggests reduced temporal diversity. These observations support an under-dispersion/common-shape concern, but do not by themselves prove complete mode collapse or that noise is ignored.
+
 ## Order-book examples
 
 The following figures use generated window 0 and real test window 0 for every run. These are unpaired examples, chosen by index rather than visual quality. Each figure shows depth by level and depth by price relative to the contemporaneous midprice. Every figure uses the same real-data colour range and the same ±15-tick price band. Volumes outside the colour range saturate; prices outside the band are not displayed. Empty cells denote no displayed volume.
@@ -317,3 +354,10 @@ VRAM budget: roughly 2–4 GiB for the training process**, assuming FP32, batch 
 ## References
 
 Yoon, J., Jarrett, D., and van der Schaar, M. (2019). Time-series Generative Adversarial Networks. *Advances in Neural Information Processing Systems*, 32 (NeurIPS 2019). [Paper](https://papers.neurips.cc/paper_files/paper/2019/file/c9efe5f26cd17ba6216bbe2a7d26d490-Paper.pdf).
+
+# Artificial Intelligence Usage Disclosure
+
+AI (ChatGPT) was used in the following sections of this repo:
+  - scaffolding model architecture, data loading, training and evaluation pipelines
+  - writing documentation
+  - writing visualisation and temporary scripts for performance analysis
